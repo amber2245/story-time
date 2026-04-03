@@ -116,30 +116,53 @@
     }
 
     function getMessageElements() {
-        return document.querySelectorAll('.mes');
+    const selectors = [
+        '.mes',
+        '.message',
+        '[data-mesid]',
+        '.chat .mes',
+        '#chat .mes',
+        '.mes_block',
+    ];
+
+    for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector);
+        if (elements.length > 0) {
+            return elements;
+        }
     }
+
+    return [];
+}
 
     function estimateAdvanceMinutes() {
         return DEFAULT_ADVANCE_MINUTES;
     }
 
     function processMessageChanges() {
-        const messages = getMessageElements();
-        const currentCount = messages.length;
+    const messages = getMessageElements();
+    const currentCount = messages.length;
 
-        if (!isInitialized) {
-            lastMessageCount = currentCount;
-            isInitialized = true;
-            return;
+    console.log('[story-time] message count:', currentCount, 'last:', lastMessageCount);
+
+    if (!isInitialized) {
+        lastMessageCount = currentCount;
+        isInitialized = true;
+        console.log('[story-time] initialized with', currentCount, 'messages');
+        return;
+    }
+
+    if (currentCount > lastMessageCount) {
+        const newMessageCount = currentCount - lastMessageCount;
+        console.log('[story-time] detected new messages:', newMessageCount);
+
+        for (let i = 0; i < newMessageCount; i += 1) {
+            advanceTime(estimateAdvanceMinutes());
         }
+    }
 
-        if (currentCount > lastMessageCount) {
-            const newMessageCount = currentCount - lastMessageCount;
-
-            for (let i = 0; i < newMessageCount; i += 1) {
-                advanceTime(estimateAdvanceMinutes());
-            }
-        }
+    lastMessageCount = currentCount;
+}
 
         lastMessageCount = currentCount;
     }
@@ -160,3 +183,4 @@
         init();
     }
 })();
+                           
