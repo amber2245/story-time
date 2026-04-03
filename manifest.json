@@ -1,0 +1,8 @@
+{
+  "display_name": "Story Time",
+  "version": "0.1.0",
+  "author": "夏初晴",
+  "description": "A simple story time tracker for SillyTavern.",
+  "js": "index.js",
+  "css": "style.css"
+} 

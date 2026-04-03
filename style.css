@@ -1,0 +1,25 @@
+.story-time-bar {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 9999;
+    padding: 8px 12px;
+    border-radius: 12px;
+    background: rgba(20, 20, 20, 0.85);
+    color: #f5f1e8;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(6px);
+}
+
+@media (max-width: 768px) {
+    .story-time-bar {
+        top: 10px;
+        left: 10px;
+        padding: 7px 10px;
+        font-size: 15px;
+        border-radius: 10px;
+    }
+}
