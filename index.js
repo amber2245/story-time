@@ -3,12 +3,11 @@
     const STORAGE_KEY = 'story-time-state';
     const DEFAULT_TIME = '07:30';
     const DEFAULT_ADVANCE_MINUTES = 5;
-    const CHECK_INTERVAL = 1500;
 
     let clockElement = null;
+    let observer = null;
     let state = loadState();
-    let lastMessageCount = 0;
-    let isInitialized = false;
+    let processedMessageIds = new Set();
 
     function loadState() {
         try {
@@ -40,7 +39,9 @@
     }
 
     function timeToMinutes(timeString) {
-        const [hours, minutes] = timeString.split(':').map(Number);
+        const parts = timeString.split(':').map(Number);
+        const hours = parts[0];
+        const minutes = parts[1];
         return hours * 60 + minutes;
     }
 
@@ -50,10 +51,6 @@
         const hours = Math.floor(normalized / 60);
         const minutes = normalized % 60;
         return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-    }
-
-    function getCurrentTime() {
-        return state.currentTime;
     }
 
     function setCurrentTime(newTime) {
@@ -68,9 +65,8 @@
     }
 
     function advanceTime(minutes) {
-        const currentMinutes = timeToMinutes(getCurrentTime());
-        const nextTime = minutesToTime(currentMinutes + minutes);
-        state.currentTime = nextTime;
+        const currentMinutes = timeToMinutes(state.currentTime);
+        state.currentTime = minutesToTime(currentMinutes + minutes);
         saveState();
         renderClock();
     }
@@ -99,8 +95,9 @@
     }
 
     function createClock() {
-        if (document.getElementById(PLUGIN_ID)) {
-            clockElement = document.getElementById(PLUGIN_ID);
+        const existing = document.getElementById(PLUGIN_ID);
+        if (existing) {
+            clockElement = existing;
             renderClock();
             return;
         }
@@ -116,60 +113,85 @@
     }
 
     function getMessageElements() {
-    const selectors = [
-        '.mes',
-        '.message',
-        '[data-mesid]',
-        '.chat .mes',
-        '#chat .mes',
-        '.mes_block',
-    ];
+        const selectors = [
+            '[data-mesid]',
+            '.mes',
+            '.message',
+            '.mes_block',
+        ];
 
-    for (const selector of selectors) {
-        const elements = document.querySelectorAll(selector);
-        if (elements.length > 0) {
-            return elements;
+        for (const selector of selectors) {
+            const elements = Array.from(document.querySelectorAll(selector));
+            if (elements.length > 0) {
+                return elements;
+            }
         }
+
+        return [];
     }
 
-    return [];
-}
+    function getMessageKey(element, index) {
+        const mesId = element.getAttribute('data-mesid');
+        if (mesId) {
+            return `mesid:${mesId}`;
+        }
+
+        return `index:${index}:${element.textContent.slice(0, 50)}`;
+    }
 
     function estimateAdvanceMinutes() {
         return DEFAULT_ADVANCE_MINUTES;
     }
 
-    function processMessageChanges() {
-    const messages = getMessageElements();
-    const currentCount = messages.length;
-
-    console.log('[story-time] message count:', currentCount, 'last:', lastMessageCount);
-
-    if (!isInitialized) {
-        lastMessageCount = currentCount;
-        isInitialized = true;
-        console.log('[story-time] initialized with', currentCount, 'messages');
-        return;
+    function seedProcessedMessages() {
+        const messages = getMessageElements();
+        processedMessageIds = new Set(
+            messages.map((element, index) => getMessageKey(element, index))
+        );
+        console.log('[story-time] seeded messages:', processedMessageIds.size);
     }
 
-    if (currentCount > lastMessageCount) {
-        const newMessageCount = currentCount - lastMessageCount;
-        console.log('[story-time] detected new messages:', newMessageCount);
+    function scanForNewMessages() {
+        const messages = getMessageElements();
+        let newMessageCount = 0;
+        const nextProcessed = new Set();
 
-        for (let i = 0; i < newMessageCount; i += 1) {
-            advanceTime(estimateAdvanceMinutes());
+        messages.forEach((element, index) => {
+            const key = getMessageKey(element, index);
+            nextProcessed.add(key);
+
+            if (!processedMessageIds.has(key)) {
+                newMessageCount += 1;
+            }
+        });
+
+        if (newMessageCount > 0) {
+            console.log('[story-time] new messages detected:', newMessageCount);
+            for (let i = 0; i < newMessageCount; i += 1) {
+                advanceTime(estimateAdvanceMinutes());
+            }
         }
-    }
 
-    lastMessageCount = currentCount;
-}
-
-        lastMessageCount = currentCount;
+        processedMessageIds = nextProcessed;
     }
 
     function startWatchingMessages() {
-        processMessageChanges();
-        window.setInterval(processMessageChanges, CHECK_INTERVAL);
+        seedProcessedMessages();
+
+        if (observer) {
+            observer.disconnect();
+        }
+
+        observer = new MutationObserver(() => {
+            scanForNewMessages();
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+        });
+
+        console.log('[story-time] observer started');
     }
 
     function init() {
@@ -183,4 +205,3 @@
         init();
     }
 })();
-                           
