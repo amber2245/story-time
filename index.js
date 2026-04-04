@@ -1,32 +1,36 @@
 (() => {
   "use strict";
 
-  const EXT_ID = "story_clock";
+  const EXT_ID = "story_time";
   const DEFAULT_STATE = {
     day: 1,
-    minutes: 7 * 60 + 30, // 默认 07:30
+    minutes: 7 * 60 + 30, // 07:30
     weather: "晴"
   };
 
   let state = { ...DEFAULT_STATE };
   let chatKey = "";
   let barEl = null;
+  let currentChatEl = null;
+  let chatObserver = null;
   const processedMes = new WeakSet();
 
+  // ---------- Context ----------
   function getContextSafe() {
     try {
-      return window.SillyTavern?.getContext?.() || null;
-    } catch {
-      return null;
-    }
+      if (window.SillyTavern?.getContext) return window.SillyTavern.getContext();
+      if (window.getContext) return window.getContext();
+    } catch (_) {}
+    return null;
   }
 
   function getChatKey() {
     const ctx = getContextSafe();
-    const id = ctx?.chatId || ctx?.groupId || "global";
+    const id = ctx?.chatId || ctx?.groupId || ctx?.characterId || "global";
     return `${EXT_ID}:${id}`;
   }
 
+  // ---------- State ----------
   function loadState() {
     const raw = localStorage.getItem(chatKey);
     if (!raw) {
@@ -35,7 +39,7 @@
     }
     try {
       state = { ...DEFAULT_STATE, ...JSON.parse(raw) };
-    } catch {
+    } catch (_) {
       state = { ...DEFAULT_STATE };
     }
   }
@@ -61,6 +65,7 @@
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   }
 
+  // ---------- UI ----------
   function renderBar() {
     if (!barEl) return;
     const timeEl = barEl.querySelector("#st-story-clock-time");
@@ -69,11 +74,63 @@
     if (metaEl) metaEl.textContent = `第${state.day}天 · ${state.weather}`;
   }
 
+  function bindBarEvents() {
+    if (!barEl || barEl.dataset.bound === "1") return;
+    barEl.dataset.bound = "1";
+
+    barEl.addEventListener("click", (e) => {
+      const btn = e.target.closest(".st-story-clock-btn");
+      if (!btn) return;
+      const act = btn.dataset.act;
+      if (act === "+10") applyDelta(10);
+      if (act === "-10") applyDelta(-10);
+    });
+  }
+
+  function ensureBar() {
+    const chat = document.querySelector("#chat");
+    if (!chat) {
+      barEl = null;
+      return;
+    }
+
+    if (barEl && chat.contains(barEl)) {
+      bindBarEvents();
+      renderBar();
+      return;
+    }
+
+    const existing = chat.querySelector("#st-story-clock-bar");
+    if (existing) {
+      barEl = existing;
+      bindBarEvents();
+      renderBar();
+      return;
+    }
+
+    barEl = document.createElement("div");
+    barEl.id = "st-story-clock-bar";
+    barEl.innerHTML = `
+      <div>
+        <div id="st-story-clock-time">--:--</div>
+        <div id="st-story-clock-meta">第1天 · 晴</div>
+      </div>
+      <div id="st-story-clock-controls">
+        <button class="st-story-clock-btn" data-act="-10">-10m</button>
+        <button class="st-story-clock-btn" data-act="+10">+10m</button>
+      </div>
+    `;
+    chat.prepend(barEl);
+
+    bindBarEvents();
+    renderBar();
+  }
+
+  // ---------- Prompt Injection ----------
   function setExtensionPrompt(prompt) {
     const ctx = getContextSafe();
     if (!ctx?.setExtensionPrompt) return;
 
-    // 兼容不同版本签名
     const tries = [
       () => ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0, true, "system"),
       () => ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0),
@@ -93,10 +150,13 @@
 - 当前时间: ${hhmm(state.minutes)}
 - 当前日期: 第${state.day}天
 - 当前天气: ${state.weather}
-要求：你的环境描写和行为决策必须符合该状态。`;
+要求：
+1) 你的环境描写与行为应符合当前状态；
+2) 不要随意改写本状态，除非剧情明确出现时间跳转。`;
     setExtensionPrompt(prompt);
   }
 
+  // ---------- Time Logic ----------
   function applyDelta(delta) {
     if (!delta || Number.isNaN(delta)) return;
     state.minutes += delta;
@@ -107,16 +167,35 @@
   }
 
   function tryParseAbsoluteTime(text) {
-    const m = text.match(/([01]?\d|2[0-3])[:：]([0-5]\d)/);
-    if (!m) return false;
-    const h = parseInt(m[1], 10);
-    const mm = parseInt(m[2], 10);
-    state.minutes = h * 60 + mm;
-    normalizeTime();
-    saveState();
-    renderBar();
-    refreshModelState();
-    return true;
+    if (!text) return false;
+
+    // 1) 12:30 / 7：05
+    let m = text.match(/([01]?\d|2[0-3])[:：]([0-5]\d)/);
+    if (m) {
+      const h = parseInt(m[1], 10);
+      const mm = parseInt(m[2], 10);
+      state.minutes = h * 60 + mm;
+      normalizeTime();
+      saveState();
+      renderBar();
+      refreshModelState();
+      return true;
+    }
+
+    // 2) 7点30 / 7点30分
+    m = text.match(/([01]?\d|2[0-3])\s*点\s*([0-5]?\d)?\s*分?/);
+    if (m) {
+      const h = parseInt(m[1], 10);
+      const mm = m[2] ? parseInt(m[2], 10) : 0;
+      state.minutes = h * 60 + mm;
+      normalizeTime();
+      saveState();
+      renderBar();
+      refreshModelState();
+      return true;
+    }
+
+    return false;
   }
 
   function estimateMinutesByText(text) {
@@ -132,7 +211,7 @@
     }
     if (/半小时/.test(text)) delta += 30;
 
-    // 行为耗时词典（第一版）
+    // 事件词典（MVP）
     const rules = [
       [/起床|醒来/, 5],
       [/洗漱|刷牙|洗脸/, 10],
@@ -152,14 +231,15 @@
       if (reg.test(text)) delta += mins;
     }
 
-    // 没抓到事件时，给一点对话底噪时间
+    // 没抓到动作，但文本较长 -> 轻微推进
     if (delta === 0 && text.replace(/\s/g, "").length >= 20) {
       delta = 2;
     }
 
-    return Math.min(delta, 240); // 单条最多推进4小时
+    return Math.min(delta, 240); // 单条最多4小时
   }
 
+  // ---------- Message Processing ----------
   function extractMessageText(mesEl) {
     const t =
       mesEl.querySelector(".mes_text")?.innerText ||
@@ -176,51 +256,27 @@
     const text = extractMessageText(mesEl);
     if (!text) return;
 
-    // 如果消息里有明确时间（如“现在是 12:30”），优先设定绝对时间
-    const hasAbsolute = tryParseAbsoluteTime(text);
-    if (hasAbsolute) return;
+    // 绝对时间优先
+    if (tryParseAbsoluteTime(text)) return;
 
     const delta = estimateMinutesByText(text);
     applyDelta(delta);
   }
 
-  function buildBar() {
-    const chat = document.querySelector("#chat");
-    if (!chat || document.querySelector("#st-story-clock-bar")) return;
+  // ---------- Chat Observer ----------
+  function bindChatObserver(chat) {
+    if (chatObserver) {
+      chatObserver.disconnect();
+      chatObserver = null;
+    }
 
-    barEl = document.createElement("div");
-    barEl.id = "st-story-clock-bar";
-    barEl.innerHTML = `
-      <div>
-        <div id="st-story-clock-time">--:--</div>
-        <div id="st-story-clock-meta">第1天 · 晴</div>
-      </div>
-      <div id="st-story-clock-controls">
-        <button class="st-story-clock-btn" data-act="-10">-10m</button>
-        <button class="st-story-clock-btn" data-act="+10">+10m</button>
-      </div>
-    `;
-    chat.prepend(barEl);
-
-    barEl.addEventListener("click", (e) => {
-      const btn = e.target.closest(".st-story-clock-btn");
-      if (!btn) return;
-      const act = btn.dataset.act;
-      if (act === "+10") applyDelta(10);
-      if (act === "-10") applyDelta(-10);
-    });
-
-    renderBar();
-  }
-
-  function observeMessages() {
-    const chat = document.querySelector("#chat");
+    currentChatEl = chat;
     if (!chat) return;
 
-    // 初始化时标记已有消息，避免启动就把历史全算一遍
+    // 不重算历史消息
     chat.querySelectorAll(".mes").forEach((el) => processedMes.add(el));
 
-    const obs = new MutationObserver((mutations) => {
+    chatObserver = new MutationObserver((mutations) => {
       for (const m of mutations) {
         for (const node of m.addedNodes) {
           if (!(node instanceof HTMLElement)) continue;
@@ -230,19 +286,29 @@
       }
     });
 
-    obs.observe(chat, { childList: true, subtree: true });
+    chatObserver.observe(chat, { childList: true, subtree: true });
   }
 
+  function ensureChatBinding() {
+    const chat = document.querySelector("#chat");
+    if (chat !== currentChatEl) {
+      bindChatObserver(chat);
+    }
+    ensureBar();
+  }
+
+  // ---------- Boot ----------
   function boot() {
     chatKey = getChatKey();
     loadState();
-    buildBar();
+    ensureChatBinding();
     renderBar();
     refreshModelState();
-    observeMessages();
 
-    // 监听切换聊天
+    // 处理切换角色卡/关闭聊天导致DOM重建
     setInterval(() => {
+      ensureChatBinding();
+
       const k = getChatKey();
       if (k !== chatKey) {
         chatKey = k;
@@ -250,9 +316,9 @@
         renderBar();
         refreshModelState();
       }
-    }, 1200);
+    }, 800);
 
-    console.log("[Story Clock] loaded.");
+    console.log("[Story Time] loaded.");
   }
 
   if (document.readyState === "loading") {
