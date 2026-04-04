@@ -43,8 +43,26 @@
 
   function getChatKey() {
     const ctx = getContextSafe();
-    const id = ctx?.chatId || ctx?.groupId || ctx?.characterId || "global";
-    return `${EXT_ID}:${id}`;
+    const candidates = [
+      ctx?.chatId,
+      ctx?.chat_id,
+      ctx?.groupId,
+      ctx?.group_id,
+      ctx?.characterId,
+      ctx?.character_id,
+      ctx?.selected_character,
+      ctx?.this_chid,
+      ctx?.name2
+    ];
+
+    for (const value of candidates) {
+      if (value !== undefined && value !== null && String(value).trim() !== "") {
+        return `${EXT_ID}:${String(value)}`;
+      }
+    }
+
+    const path = window.location?.hash || window.location?.pathname || "global";
+    return `${EXT_ID}:${path}`;
   }
 
   function loadState() {
@@ -274,49 +292,69 @@
   }
 
   function setExtensionPrompt(prompt) {
-  const ctx = getContextSafe();
-  if (!ctx) return false;
+    const ctx = getContextSafe();
+    if (!ctx) return false;
 
-  let ok = false;
+    let ok = false;
 
-  // 先直接写入 extensionPrompts，确保对象里有记录
-  try {
-    if (ctx.extensionPrompts) {
-      ctx.extensionPrompts[EXT_ID] = {
-        value: prompt,
-        position: 0,
-        depth: 1
-      };
-      ok = true;
+    try {
+      if (ctx.extensionPrompts) {
+        ctx.extensionPrompts[EXT_ID] = {
+          value: prompt,
+          position: 0,
+          depth: 1,
+          scan: false,
+          role: 0
+        };
+        ok = true;
+      }
+    } catch (err) {
+      console.warn("[Story Time] direct extensionPrompts write failed:", err);
     }
-  } catch (err) {
-    console.warn("[Story Time] direct extensionPrompts write failed:", err);
-  }
 
-  // 再调用官方接口同步一次
-  try {
-    if (typeof ctx.setExtensionPrompt === "function") {
-      ctx.setExtensionPrompt(EXT_ID, prompt, 0, 1);
-      ok = true;
+    try {
+      if (typeof ctx.setExtensionPrompt === "function") {
+        ctx.setExtensionPrompt(EXT_ID, prompt, 0, 1);
+        ok = true;
+      }
+    } catch (err) {
+      console.warn("[Story Time] setExtensionPrompt failed:", err);
     }
-  } catch (err) {
-    console.warn("[Story Time] setExtensionPrompt failed:", err);
+
+    return ok;
   }
-
-  // 调试输出，方便你在控制台确认
-  try {
-    console.log("[Story Time] extension prompt entry:", ctx.extensionPrompts?.[EXT_ID]);
-  } catch (_) {}
-
-  return ok;
-}
 
   function buildPrompt() {
     const festival = getFestival();
     const deltaText = formatDelta(state.lastDeltaMinutes);
-    const transitionLine = state.lastTransitionLabel ? `- 建议表现: ${state.lastTransitionLabel}` : "- 建议表现: 无需强调时间跳跃";
-    const reasonLine = state.lastDeltaReason ? `- 最近时间变化原因: ${state.lastDeltaReason}` : "- 最近时间变化原因: 无";
-    const triggerLine = state.lastTriggerText ? `- 最近触发内容: ${state.lastTriggerText}` : "- 最近触发内容: 无";
+    const recentJump = state.lastDeltaMinutes >= 30;
+    const recentBigJump = state.lastDeltaMinutes >= 120;
+    const weatherIsImportant = /小雨|中雨|雷阵雨|雪|雾/.test(state.weather);
+    const festivalIsImportant = Boolean(festival) && /情人节|圣诞节|元旦|跨年夜/.test(festival);
+
+    const dynamicRules = [];
+
+    if (recentJump) {
+      dynamicRules.push("最近发生了明显时间推进，请在正文开头或前半段自然体现时段变化。");
+    } else {
+      dynamicRules.push("最近没有明显时间跳跃，不要刻意反复强调当前时段。");
+    }
+
+    if (recentBigJump || state.lastDeltaReason === "sleep") {
+      dynamicRules.push("若刚经历睡眠、过夜或数小时跳时，可使用“第二天清晨”“数小时后”“天已经亮了”等表达。");
+    }
+
+    if (weatherIsImportant) {
+      dynamicRules.push("当前天气对环境和行动有实际影响，可在需要时体现体感、声音、地面、视线或出行准备。");
+    } else {
+      dynamicRules.push("天气作为背景常识即可，除非场景需要，否则不要每轮都提。");
+    }
+
+    if (festivalIsImportant) {
+      dynamicRules.push("节日只在互动、气氛或安排确实相关时再提，不要机械重复节日本身。");
+    } else {
+      dynamicRules.push("日期和节日通常保持为背景信息，不必主动反复提及。");
+    }
 
     return `[剧情状态]
 - 当前时间: ${hhmm(state.minutes)}（${getPhase(state.minutes)}）
@@ -325,35 +363,36 @@
 - 当前节日: ${festival || "无"}
 - 当前时段倾向: ${getMealHint(state.minutes)}
 - 最近时间变化: ${deltaText}
-${reasonLine}
-${triggerLine}
-${transitionLine}
+- 最近变化原因: ${state.lastDeltaReason || "无"}
+- 最近触发内容: ${state.lastTriggerText || "无"}
+- 建议表现: ${state.lastTransitionLabel || "无需特别强调"}
 
-[写作要求]
-1. 你的正文必须符合当前剧情时间、天气、节日与时段氛围。
-2. 如果最近时间变化达到30分钟以上，尤其是睡觉、过夜、数小时后，请在正文里自然体现时间推进，例如“第二天清晨”“数小时后”“天已经亮了”“夜色更深了”等。
-3. 不要机械复述状态栏，不要直接照抄“当前时间: xx:xx”，而是把它融入环境、光线、角色行为和日常安排中。
-4. 早晨适合苏醒、晨光、早餐、出门准备；中午适合午餐、日照最亮；傍晚适合暮色、晚餐、归家；深夜适合安静、困意、休息。
-5. 当天气为雨、雪、雾时，环境描写和人物行动应自然受其影响。
-6. 除非剧情明确再次发生时间跳跃，否则不要额外擅自大幅改变时间。`;
+[写作原则]
+1. 始终知晓当前时间、天气、日期和节日，并让角色行为、作息和环境符合这些状态。
+2. 不要每次回复都重复提及时间、天气或节日；只有当它们正在影响场景、行为、情绪、光线、体感、安排时，才自然表现出来。
+3. 若上一条已经明显表现过时段、天气或节日，本条除非剧情有新变化，否则应收敛，不要机械复读。
+4. 时间信息优先影响作息与行动逻辑，例如早晨适合苏醒、洗漱、早餐、出门准备；中午适合午餐与日照最亮；傍晚适合暮色、归家、晚餐；深夜适合安静、困意与休息。
+5. 天气信息优先影响环境、声音、光线、体感与出行准备，例如下雨可能带来雨声、潮气、湿地面、带伞需求，但不必每轮都写。
+6. 节日信息默认只是背景，不要把它当作每条都必须出现的主题；只有当人物真的会因此改变安排、情绪或互动时，再体现出来。
+7. 除非剧情明确再次发生时间跳跃，否则不要擅自额外大幅改变时间。
+
+[本轮额外提醒]
+- ${dynamicRules.join("\n- ")}`;
   }
 
   function refreshModelState() {
-  const prompt = buildPrompt();
-  const ok = setExtensionPrompt(prompt);
-  const ctx = getContextSafe();
+    const prompt = buildPrompt();
+    const ctx = getContextSafe();
+    const ok = setExtensionPrompt(prompt);
 
-  window.storyTimeDebug = {
-    chatKey,
-    state: { ...state },
-    prompt,
-    injected: ok,
-    extensionPromptEntry: ctx?.extensionPrompts?.[EXT_ID] || null
-  };
-
-  console.log("[Story Time] prompt injected:", ok);
-  console.log("[Story Time] prompt text:", prompt);
-}
+    window.storyTimeDebug = {
+      chatKey,
+      state: { ...state },
+      prompt,
+      injected: ok,
+      extensionPromptEntry: ctx?.extensionPrompts?.[EXT_ID] || null
+    };
+  }
 
   function applyDelta(delta) {
     if (!delta || Number.isNaN(delta)) return;
@@ -672,9 +711,10 @@ ${transitionLine}
 
   function openSettings() {
     const menu = prompt(
-`Story Time v0.26 设置
+`Story Time 设置
 当前：${hhmm(state.minutes)} | ${state.month}月${state.day}日 | ${state.weather}
 自动天气：${state.autoWeather ? "开" : "关"}
+当前会话Key：${chatKey}
 
 1 设置时间(HH:mm)
 2 设置日期(M-D)
@@ -735,7 +775,7 @@ ${transitionLine}
 
     if (c === "6") {
       const injected = window.storyTimeDebug?.injected ? "成功" : "失败/未知";
-      alert(`提示词注入状态：${injected}\n你也可以在控制台输入 window.storyTimeDebug 查看详细内容。`);
+      alert(`提示词注入状态：${injected}\n当前会话Key：${chatKey}`);
     }
   }
 
@@ -794,7 +834,7 @@ ${transitionLine}
       }
     }, 800);
 
-    console.log("[Story Time v0.26] loaded.");
+    console.log("[Story Time v0.27] loaded.");
   }
 
   if (document.readyState === "loading") {
