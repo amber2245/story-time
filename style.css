@@ -22,12 +22,13 @@
 
 #st-story-clock-meta {
   font-size: 0.82rem;
-  opacity: 0.8;
+  opacity: 0.85;
 }
 
 #st-story-clock-controls {
   display: flex;
   gap: 6px;
+  align-items: center;
 }
 
 .st-story-clock-btn {
@@ -40,9 +41,14 @@
   cursor: pointer;
 }
 
+.st-story-clock-btn[data-act="settings"] {
+  padding: 2px 9px;
+  font-size: 0.9rem;
+}
+
 @media (max-width: 768px) {
   #st-story-clock-bar {
-    margin: 6px 6px;
+    margin: 6px;
     padding: 10px 12px;
     border-radius: 14px;
   }

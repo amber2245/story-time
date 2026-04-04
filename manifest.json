@@ -1,9 +1,9 @@
 {
   "name": "story_time",
   "display_name": "Story Time",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "夏初晴",
-  "description": "AI simple story time tracker",
+  "description": "AI story timeline tracker with date/weather/festival",
   "js": "index.js",
   "css": "style.css",
   "loading_order": 20,
