@@ -274,25 +274,42 @@
   }
 
   function setExtensionPrompt(prompt) {
-    const ctx = getContextSafe();
-    if (!ctx) return false;
+  const ctx = getContextSafe();
+  if (!ctx) return false;
 
-    const tries = [
-      () => ctx.setExtensionPrompt && ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0, true, "system"),
-      () => ctx.setExtensionPrompt && ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0),
-      () => ctx.setExtensionPrompt && ctx.setExtensionPrompt(EXT_ID, prompt),
-      () => ctx.extensionPrompts && (ctx.extensionPrompts[EXT_ID] = { value: prompt, position: 0, depth: 1 }),
-      () => window.extension_prompts && (window.extension_prompts[EXT_ID] = { value: prompt, position: 0, depth: 1 })
-    ];
+  let ok = false;
 
-    for (const t of tries) {
-      try {
-        const result = t();
-        if (result !== false) return true;
-      } catch (_) {}
+  // 先直接写入 extensionPrompts，确保对象里有记录
+  try {
+    if (ctx.extensionPrompts) {
+      ctx.extensionPrompts[EXT_ID] = {
+        value: prompt,
+        position: 0,
+        depth: 1
+      };
+      ok = true;
     }
-    return false;
+  } catch (err) {
+    console.warn("[Story Time] direct extensionPrompts write failed:", err);
   }
+
+  // 再调用官方接口同步一次
+  try {
+    if (typeof ctx.setExtensionPrompt === "function") {
+      ctx.setExtensionPrompt(EXT_ID, prompt, 0, 1);
+      ok = true;
+    }
+  } catch (err) {
+    console.warn("[Story Time] setExtensionPrompt failed:", err);
+  }
+
+  // 调试输出，方便你在控制台确认
+  try {
+    console.log("[Story Time] extension prompt entry:", ctx.extensionPrompts?.[EXT_ID]);
+  } catch (_) {}
+
+  return ok;
+}
 
   function buildPrompt() {
     const festival = getFestival();
@@ -322,20 +339,21 @@ ${transitionLine}
   }
 
   function refreshModelState() {
-    const prompt = buildPrompt();
-    const ok = setExtensionPrompt(prompt);
+  const prompt = buildPrompt();
+  const ok = setExtensionPrompt(prompt);
+  const ctx = getContextSafe();
 
-    window.storyTimeDebug = {
-      chatKey,
-      state: { ...state },
-      prompt,
-      injected: ok
-    };
+  window.storyTimeDebug = {
+    chatKey,
+    state: { ...state },
+    prompt,
+    injected: ok,
+    extensionPromptEntry: ctx?.extensionPrompts?.[EXT_ID] || null
+  };
 
-    if (!ok) {
-      console.warn("[Story Time] prompt injection may have failed.");
-    }
-  }
+  console.log("[Story Time] prompt injected:", ok);
+  console.log("[Story Time] prompt text:", prompt);
+}
 
   function applyDelta(delta) {
     if (!delta || Number.isNaN(delta)) return;
