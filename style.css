@@ -1,51 +1,59 @@
-.story-time-bar,
-.story-time-advance {
+.story-time-container {
     position: fixed;
-    left: 12px;
+    top: 10px;
+    left: 10px;
     z-index: 9999;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.story-time-bar,
+.story-time-plus {
     border: none;
     border-radius: 12px;
     background: rgba(20, 20, 20, 0.85);
     color: #f5f1e8;
-    font-weight: 600;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
     backdrop-filter: blur(6px);
     cursor: pointer;
+    font-weight: 600;
 }
 
 .story-time-bar {
-    top: 12px;
     padding: 8px 12px;
     font-size: 16px;
     line-height: 1;
 }
 
-.story-time-advance {
-    top: 54px;
+.story-time-plus {
     padding: 7px 10px;
-    font-size: 13px;
+    font-size: 12px;
     line-height: 1;
+    opacity: 0.9;
 }
 
 .story-time-bar:active,
-.story-time-advance:active {
+.story-time-plus:active {
     transform: scale(0.98);
 }
 
 @media (max-width: 768px) {
+    .story-time-container {
+        top: 8px;
+        left: 8px;
+        gap: 5px;
+    }
+
     .story-time-bar {
-        top: 10px;
-        left: 10px;
         padding: 7px 10px;
         font-size: 15px;
         border-radius: 10px;
     }
 
-    .story-time-advance {
-        top: 48px;
-        left: 10px;
-        padding: 6px 9px;
-        font-size: 12px;
+    .story-time-plus {
+        padding: 6px 8px;
+        font-size: 11px;
         border-radius: 10px;
     }
 }
