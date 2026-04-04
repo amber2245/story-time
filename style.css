@@ -1,59 +1,57 @@
-.story-time-container {
-    position: fixed;
-    top: 10px;
-    left: 10px;
-    z-index: 9999;
-    display: flex;
-    gap: 6px;
-    align-items: center;
+#st-story-clock-bar {
+  position: sticky;
+  top: 6px;
+  z-index: 50;
+  margin: 6px 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  backdrop-filter: blur(6px);
+  background: rgba(20, 20, 24, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
-.story-time-bar,
-.story-time-plus {
-    border: none;
-    border-radius: 12px;
-    background: rgba(20, 20, 20, 0.85);
-    color: #f5f1e8;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-    backdrop-filter: blur(6px);
-    cursor: pointer;
-    font-weight: 600;
+#st-story-clock-time {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
 }
 
-.story-time-bar {
-    padding: 8px 12px;
-    font-size: 16px;
-    line-height: 1;
+#st-story-clock-meta {
+  font-size: 0.82rem;
+  opacity: 0.8;
 }
 
-.story-time-plus {
-    padding: 7px 10px;
-    font-size: 12px;
-    line-height: 1;
-    opacity: 0.9;
+#st-story-clock-controls {
+  display: flex;
+  gap: 6px;
 }
 
-.story-time-bar:active,
-.story-time-plus:active {
-    transform: scale(0.98);
+.st-story-clock-btn {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  border-radius: 8px;
+  padding: 2px 8px;
+  font-size: 0.78rem;
+  cursor: pointer;
 }
 
 @media (max-width: 768px) {
-    .story-time-container {
-        top: 8px;
-        left: 8px;
-        gap: 5px;
-    }
+  #st-story-clock-bar {
+    margin: 6px 6px;
+    padding: 10px 12px;
+    border-radius: 14px;
+  }
 
-    .story-time-bar {
-        padding: 7px 10px;
-        font-size: 15px;
-        border-radius: 10px;
-    }
+  #st-story-clock-time {
+    font-size: 1.25rem;
+  }
 
-    .story-time-plus {
-        padding: 6px 8px;
-        font-size: 11px;
-        border-radius: 10px;
-    }
+  #st-story-clock-meta {
+    font-size: 0.86rem;
+  }
 }
