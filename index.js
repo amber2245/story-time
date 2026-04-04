@@ -19,7 +19,11 @@
     day: 1,
     minutes: 7 * 60 + 30,
     weather: "晴",
-    autoWeather: true
+    autoWeather: true,
+    lastDeltaMinutes: 0,
+    lastDeltaReason: "",
+    lastTriggerText: "",
+    lastTransitionLabel: ""
   };
 
   let state = { ...DEFAULT_STATE };
@@ -29,7 +33,6 @@
   let chatObserver = null;
   const processedMes = new WeakSet();
 
-  // ---------- 基础 ----------
   function getContextSafe() {
     try {
       if (window.SillyTavern?.getContext) return window.SillyTavern.getContext();
@@ -103,8 +106,12 @@
   }
 
   function shiftDate(days) {
-    if (days > 0) for (let i = 0; i < days; i++) advanceOneDay();
-    if (days < 0) for (let i = 0; i < Math.abs(days); i++) backOneDay();
+    if (days > 0) {
+      for (let i = 0; i < days; i++) advanceOneDay();
+    }
+    if (days < 0) {
+      for (let i = 0; i < Math.abs(days); i++) backOneDay();
+    }
   }
 
   function normalizeTime() {
@@ -148,13 +155,53 @@
     return "普通活动时段";
   }
 
+  function formatDelta(minutes) {
+    if (!minutes) return "无";
+    const abs = Math.abs(minutes);
+    const h = Math.floor(abs / 60);
+    const m = abs % 60;
+    const sign = minutes > 0 ? "+" : "-";
+    if (h > 0 && m > 0) return `${sign}${h}小时${m}分钟`;
+    if (h > 0) return `${sign}${h}小时`;
+    return `${sign}${m}分钟`;
+  }
+
+  function buildTransitionLabel(delta, reason) {
+    const phase = getPhase(state.minutes);
+    if (delta >= 300 || reason === "sleep") {
+      if (phase === "清晨") return "第二天清晨";
+      if (phase === "上午") return "第二天早上";
+      if (phase === "中午") return "第二天中午";
+      if (phase === "下午") return "第二天下午";
+      if (phase === "傍晚") return "第二天傍晚";
+      return `第二天${phase}`;
+    }
+    if (delta >= 120) {
+      if (phase === "清晨" || phase === "上午") return "数小时后，已近早晨";
+      if (phase === "中午") return "数小时后，已到中午";
+      if (phase === "下午") return "数小时后，天色已亮";
+      if (phase === "傍晚") return "数小时后，已近傍晚";
+      return `数小时后，已是${phase}`;
+    }
+    if (delta >= 30) {
+      return `${phase}稍晚些时候`;
+    }
+    return "";
+  }
+
   function commitState() {
     saveState();
     renderBar();
     refreshModelState();
   }
 
-  // ---------- UI ----------
+  function recordTransition(delta, reason, text) {
+    state.lastDeltaMinutes = delta || 0;
+    state.lastDeltaReason = reason || "";
+    state.lastTriggerText = (text || "").slice(0, 120);
+    state.lastTransitionLabel = buildTransitionLabel(delta || 0, reason || "");
+  }
+
   function renderBar() {
     if (!barEl) return;
     const timeEl = barEl.querySelector("#st-story-clock-time");
@@ -174,8 +221,14 @@
       const btn = e.target.closest(".st-story-clock-btn");
       if (!btn) return;
       const act = btn.dataset.act;
-      if (act === "+10") applyDelta(10);
-      if (act === "-10") applyDelta(-10);
+      if (act === "+10") {
+        recordTransition(10, "manual", "手动调整");
+        applyDelta(10);
+      }
+      if (act === "-10") {
+        recordTransition(-10, "manual", "手动调整");
+        applyDelta(-10);
+      }
       if (act === "settings") openSettings();
     });
   }
@@ -220,42 +273,70 @@
     renderBar();
   }
 
-  // ---------- 注入模型 ----------
   function setExtensionPrompt(prompt) {
     const ctx = getContextSafe();
-    if (!ctx?.setExtensionPrompt) return;
+    if (!ctx) return false;
 
     const tries = [
-      () => ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0, true, "system"),
-      () => ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0),
-      () => ctx.setExtensionPrompt(EXT_ID, prompt)
+      () => ctx.setExtensionPrompt && ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0, true, "system"),
+      () => ctx.setExtensionPrompt && ctx.setExtensionPrompt(EXT_ID, prompt, 1, 0),
+      () => ctx.setExtensionPrompt && ctx.setExtensionPrompt(EXT_ID, prompt),
+      () => ctx.extensionPrompts && (ctx.extensionPrompts[EXT_ID] = { value: prompt, position: 0, depth: 1 }),
+      () => window.extension_prompts && (window.extension_prompts[EXT_ID] = { value: prompt, position: 0, depth: 1 })
     ];
 
     for (const t of tries) {
       try {
-        t();
-        return;
+        const result = t();
+        if (result !== false) return true;
       } catch (_) {}
     }
+    return false;
+  }
+
+  function buildPrompt() {
+    const festival = getFestival();
+    const deltaText = formatDelta(state.lastDeltaMinutes);
+    const transitionLine = state.lastTransitionLabel ? `- 建议表现: ${state.lastTransitionLabel}` : "- 建议表现: 无需强调时间跳跃";
+    const reasonLine = state.lastDeltaReason ? `- 最近时间变化原因: ${state.lastDeltaReason}` : "- 最近时间变化原因: 无";
+    const triggerLine = state.lastTriggerText ? `- 最近触发内容: ${state.lastTriggerText}` : "- 最近触发内容: 无";
+
+    return `[剧情状态]
+- 当前时间: ${hhmm(state.minutes)}（${getPhase(state.minutes)}）
+- 当前日期: ${state.month}月${state.day}日
+- 当前天气: ${state.weather}
+- 当前节日: ${festival || "无"}
+- 当前时段倾向: ${getMealHint(state.minutes)}
+- 最近时间变化: ${deltaText}
+${reasonLine}
+${triggerLine}
+${transitionLine}
+
+[写作要求]
+1. 你的正文必须符合当前剧情时间、天气、节日与时段氛围。
+2. 如果最近时间变化达到30分钟以上，尤其是睡觉、过夜、数小时后，请在正文里自然体现时间推进，例如“第二天清晨”“数小时后”“天已经亮了”“夜色更深了”等。
+3. 不要机械复述状态栏，不要直接照抄“当前时间: xx:xx”，而是把它融入环境、光线、角色行为和日常安排中。
+4. 早晨适合苏醒、晨光、早餐、出门准备；中午适合午餐、日照最亮；傍晚适合暮色、晚餐、归家；深夜适合安静、困意、休息。
+5. 当天气为雨、雪、雾时，环境描写和人物行动应自然受其影响。
+6. 除非剧情明确再次发生时间跳跃，否则不要额外擅自大幅改变时间。`;
   }
 
   function refreshModelState() {
-    const festival = getFestival();
-    const prompt = `[剧情状态]
-- 时间: ${hhmm(state.minutes)}（${getPhase(state.minutes)}）
-- 日期: ${state.month}月${state.day}日
-- 天气: ${state.weather}
-- 节日: ${festival || "无"}
-- 时段提示: ${getMealHint(state.minutes)}
+    const prompt = buildPrompt();
+    const ok = setExtensionPrompt(prompt);
 
-规则：
-1) 环境描写与行为要符合时间/天气/节日；
-2) 时间推进以系统状态为准，不要机械固定分钟；
-3) 只有出现明确时间词或剧情显著进展时再大幅跳时。`;
-    setExtensionPrompt(prompt);
+    window.storyTimeDebug = {
+      chatKey,
+      state: { ...state },
+      prompt,
+      injected: ok
+    };
+
+    if (!ok) {
+      console.warn("[Story Time] prompt injection may have failed.");
+    }
   }
 
-  // ---------- 时间解析（分层） ----------
   function applyDelta(delta) {
     if (!delta || Number.isNaN(delta)) return;
     state.minutes += delta;
@@ -263,9 +344,11 @@
     commitState();
   }
 
-  function setAbsoluteTime(h, m) {
+  function setAbsoluteTime(h, m, reason = "absolute_time", text = "") {
+    const oldMinutes = state.minutes;
     state.minutes = h * 60 + m;
     normalizeTime();
+    recordTransition(state.minutes - oldMinutes, reason, text);
     commitState();
   }
 
@@ -289,28 +372,26 @@
     if (map[str] != null) return map[str];
     if (str === "十") return 10;
 
-    // 十三 / 二十 / 二十三
     if (str.includes("十")) {
-      const [a, b] = str.split("十");
-      const tens = a ? (map[a] || 0) : 1;
-      const ones = b ? (map[b] || 0) : 0;
+      const parts = str.split("十");
+      const tens = parts[0] ? (map[parts[0]] || 0) : 1;
+      const ones = parts[1] ? (map[parts[1]] || 0) : 0;
       return tens * 10 + ones;
     }
 
     return NaN;
   }
 
-  // Layer 1: 绝对时间锚点
   function tryParseAbsoluteTime(text) {
     let m = text.match(/([01]?\d|2[0-3])[:：]([0-5]\d)/);
     if (m) {
-      setAbsoluteTime(parseInt(m[1], 10), parseInt(m[2], 10));
+      setAbsoluteTime(parseInt(m[1], 10), parseInt(m[2], 10), "absolute_time", text);
       return true;
     }
 
     m = text.match(/([01]?\d|2[0-3])\s*点\s*([0-5]?\d)?\s*分?/);
     if (m) {
-      setAbsoluteTime(parseInt(m[1], 10), m[2] ? parseInt(m[2], 10) : 0);
+      setAbsoluteTime(parseInt(m[1], 10), m[2] ? parseInt(m[2], 10) : 0, "absolute_time", text);
       return true;
     }
     return false;
@@ -318,9 +399,11 @@
 
   function tryParsePeriodAnchor(text) {
     let touched = false;
+    let movedDays = 0;
 
     if (/(第二天|次日|翌日|隔天)/.test(text)) {
       shiftDate(1);
+      movedDays = 1;
       touched = true;
     }
 
@@ -344,6 +427,7 @@
 
     if (touched) {
       normalizeTime();
+      recordTransition(movedDays > 0 ? movedDays * 1440 : 60, "period_anchor", text);
       commitState();
       return true;
     }
@@ -351,12 +435,10 @@
     return false;
   }
 
-  // Layer 2: 显式时长
   function parseExplicitDuration(text) {
     let minutes = 0;
     let hit = false;
 
-    // X小时
     for (const m of text.matchAll(/([一二两三四五六七八九十半\d]+)\s*小时(?:后|之后|左右|内)?/g)) {
       const n = parseCNNumber(m[1]);
       if (!Number.isNaN(n)) {
@@ -365,7 +447,6 @@
       }
     }
 
-    // X分钟
     for (const m of text.matchAll(/([一二两三四五六七八九十\d]+)\s*分钟(?:后|之后|左右|内)?/g)) {
       const n = parseCNNumber(m[1]);
       if (!Number.isNaN(n)) {
@@ -374,13 +455,10 @@
       }
     }
 
-    // 半小时
     if (/半个?小时/.test(text)) {
       minutes += 30;
       hit = true;
     }
-
-    // 一刻钟/两刻钟
     if (/一刻钟/.test(text)) {
       minutes += 15;
       hit = true;
@@ -393,100 +471,112 @@
     return { minutes, hit };
   }
 
-  // Layer 3: 事件类别推断（非穷举）
   const CATEGORY_RULES = [
-    { name: "meal", reg: /(吃(完|过|了)?(饭|早餐|早饭|午饭|中饭|午餐|晚饭|晚餐|宵夜)?|用餐|进餐)/, range: [18, 45] },
-    { name: "cook", reg: /(做饭|下厨|烹饪|备餐|准备.*(饭|餐))/, range: [20, 50] },
-    { name: "hygiene", reg: /(洗漱|刷牙|洗脸|梳洗|化妆|整理仪容|打理自己)/, range: [8, 20] },
-    { name: "dress", reg: /(换(好)?衣服|更衣|穿好衣服|穿戴整齐)/, range: [6, 15] },
-    { name: "commute", reg: /(出门|赶路|通勤|坐车|开车|乘车|打车|地铁|公交|骑车|步行前往|前往)/, range: [12, 45] },
-    { name: "work_study", reg: /(上课|工作|学习|开会|训练|写作业|值班|处理文件)/, range: [35, 120] },
-    { name: "social", reg: /(约会|聚会|会面|拜访|长谈|闲聊了一会|聊了很久)/, range: [15, 60] },
-    { name: "shopping", reg: /(购物|采购|逛街|商场|买菜)/, range: [20, 90] },
-    { name: "exercise", reg: /(跑步|锻炼|健身|打球|游泳|运动)/, range: [20, 80] },
-    { name: "rest", reg: /(休息|小憩|午睡|躺一会|闭目养神)/, range: [10, 50] },
-    { name: "sleep", reg: /(睡觉|入睡|睡着|过夜|补觉)/, range: [360, 540] },
-    { name: "medical", reg: /(包扎|治疗|看医生|就诊|输液|护理)/, range: [20, 90] }
+    { name: "meal", reg: /(吃(完|过|了)?(饭|早餐|早饭|午饭|中饭|午餐|晚饭|晚餐|宵夜)?|用餐|进餐)/, range: [18, 45], reason: "meal" },
+    { name: "cook", reg: /(做饭|下厨|烹饪|备餐|准备.*(饭|餐))/, range: [20, 50], reason: "cook" },
+    { name: "hygiene", reg: /(洗漱|刷牙|洗脸|梳洗|化妆|整理仪容|打理自己)/, range: [8, 20], reason: "hygiene" },
+    { name: "dress", reg: /(换(好)?衣服|更衣|穿好衣服|穿戴整齐)/, range: [6, 15], reason: "dress" },
+    { name: "commute", reg: /(出门|赶路|通勤|坐车|开车|乘车|打车|地铁|公交|骑车|步行前往|前往)/, range: [12, 45], reason: "commute" },
+    { name: "work_study", reg: /(上课|工作|学习|开会|训练|写作业|值班|处理文件)/, range: [35, 120], reason: "work_study" },
+    { name: "social", reg: /(约会|聚会|会面|拜访|长谈|闲聊了一会|聊了很久)/, range: [15, 60], reason: "social" },
+    { name: "shopping", reg: /(购物|采购|逛街|商场|买菜)/, range: [20, 90], reason: "shopping" },
+    { name: "exercise", reg: /(跑步|锻炼|健身|打球|游泳|运动)/, range: [20, 80], reason: "exercise" },
+    { name: "rest", reg: /(休息|小憩|午睡|躺一会|闭目养神)/, range: [10, 50], reason: "rest" },
+    { name: "sleep", reg: /(睡觉|入睡|睡着|过夜|补觉)/, range: [360, 540], reason: "sleep" },
+    { name: "medical", reg: /(包扎|治疗|看医生|就诊|输液|护理)/, range: [20, 90], reason: "medical" }
   ];
 
   function estimateCategoryMinutes(text) {
     let minutes = 0;
     let count = 0;
+    let mainReason = "";
 
     for (const rule of CATEGORY_RULES) {
       if (!rule.reg.test(text)) continue;
       count += 1;
 
-      let [min, max] = rule.range;
+      let min = rule.range[0];
+      let max = rule.range[1];
 
-      // meal 按时段微调
       if (rule.name === "meal") {
-        const m = state.minutes;
-        if (m >= 330 && m <= 570) [min, max] = [15, 30];      // 早餐区
-        else if (m >= 660 && m <= 870) [min, max] = [25, 45]; // 午餐区
-        else if (m >= 1020 && m <= 1260) [min, max] = [30, 55];// 晚餐区
+        const current = state.minutes;
+        if (current >= 330 && current <= 570) {
+          min = 15;
+          max = 30;
+        } else if (current >= 660 && current <= 870) {
+          min = 25;
+          max = 45;
+        } else if (current >= 1020 && current <= 1260) {
+          min = 30;
+          max = 55;
+        }
       }
 
       minutes += pickRange(min, max, `${text}|${rule.name}|${state.minutes}`);
+      if (!mainReason) mainReason = rule.reason;
     }
 
-    return { minutes, count };
+    return { minutes, count, reason: mainReason };
   }
 
-  // Layer 4: 叙事流逝推断
   function estimateNarrativeMinutes(text) {
     let n = 0;
+    let reason = "";
 
     if (/(不知不觉(间)?|转眼(间)?|一晃|过了许久|良久)/.test(text)) {
       n += pickRange(10, 30, text + "|flow_strong");
+      reason = reason || "narrative_flow";
     }
 
     if (/(过了一会儿?|过了一阵子?|片刻后|随后|接着|然后|不久后)/.test(text)) {
       n += pickRange(3, 12, text + "|flow_mid");
+      reason = reason || "narrative_flow";
     }
 
     if (/(天色渐暗|夜幕降临|天亮了|日出|日落|黄昏|傍晚时分)/.test(text)) {
       n += pickRange(20, 70, text + "|scene_daylight");
+      reason = reason || "scene_shift";
     }
 
     if (/(外面|窗外).*(下起|开始下).*(雨|雪)|雨越下越大|突然下雨/.test(text)) {
       n += pickRange(6, 20, text + "|scene_weather_shift");
+      reason = reason || "scene_shift";
     }
 
-    return n;
+    return { minutes: n, reason };
   }
 
-  // Layer 5: 兜底
   function estimateFallbackMinutes(text) {
     const clean = text.replace(/\s+/g, "");
     const len = clean.length;
-
     let base = 1;
+
     if (len <= 6) base = 1;
     else if (len <= 25) base = 2;
     else if (len <= 80) base = 3;
     else base = 4;
 
-    const jitter = hashText(clean) % 2; // 0~1，防机械
+    const jitter = hashText(clean) % 2;
     return base + jitter;
   }
 
   function estimateMinutesByText(text) {
-    if (!text) return 0;
+    if (!text) return { delta: 0, reason: "" };
 
     const explicit = parseExplicitDuration(text);
     const category = estimateCategoryMinutes(text);
     const narrative = estimateNarrativeMinutes(text);
 
     let total = 0;
+    let reason = "";
 
     if (explicit.hit) {
-      // 显式时长主导，其他层只给小幅修正，防爆炸
-      total = explicit.minutes + Math.round((category.minutes + narrative) * 0.35);
+      total = explicit.minutes + Math.round((category.minutes + narrative.minutes) * 0.35);
+      reason = "explicit_duration";
     } else {
-      total = category.minutes + narrative;
+      total = category.minutes + narrative.minutes;
+      reason = category.reason || narrative.reason || "";
 
-      // 多类别事件加成：同句做了多件事
       if (category.count >= 2 && total > 0) {
         const factor = 1 + Math.min(0.35, (category.count - 1) * 0.1);
         total = Math.round(total * factor);
@@ -495,13 +585,15 @@
 
     if (total <= 0) {
       total = estimateFallbackMinutes(text);
+      reason = "fallback_chat";
     }
 
-    // 安全上限：单条最多 6 小时
-    return Math.min(total, 360);
+    return {
+      delta: Math.min(total, 360),
+      reason: reason || "generic_progress"
+    };
   }
 
-  // ---------- 状态解析 ----------
   function tryParseDate(text) {
     const m = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]/);
     if (!m) return false;
@@ -533,7 +625,6 @@
     return true;
   }
 
-  // ---------- 消息处理 ----------
   function extractMessageText(mesEl) {
     const t =
       mesEl.querySelector(".mes_text")?.innerText ||
@@ -550,23 +641,20 @@
     if (!text) return;
     processedMes.add(mesEl);
 
-    // 天气/日期先解析（可与时间并存）
     tryParseWeather(text);
     tryParseDate(text);
 
-    // Layer 1: 锚点（命中就结束）
     if (tryParseAbsoluteTime(text)) return;
     if (tryParsePeriodAnchor(text)) return;
 
-    // Layer 2~5
-    const delta = estimateMinutesByText(text);
-    applyDelta(delta);
+    const estimation = estimateMinutesByText(text);
+    recordTransition(estimation.delta, estimation.reason, text);
+    applyDelta(estimation.delta);
   }
 
-  // ---------- 设置 ----------
   function openSettings() {
     const menu = prompt(
-`Story Time v0.25 设置
+`Story Time v0.26 设置
 当前：${hhmm(state.minutes)} | ${state.month}月${state.day}日 | ${state.weather}
 自动天气：${state.autoWeather ? "开" : "关"}
 
@@ -575,6 +663,7 @@
 3 设置天气
 4 切换自动天气
 5 重置当前会话状态
+6 查看注入状态
 
 输入序号：`
     );
@@ -586,7 +675,7 @@
       if (!t) return;
       const m = t.match(/^([01]?\d|2[0-3])[:：]([0-5]\d)$/);
       if (!m) return alert("时间格式错误");
-      setAbsoluteTime(parseInt(m[1], 10), parseInt(m[2], 10));
+      setAbsoluteTime(parseInt(m[1], 10), parseInt(m[2], 10), "manual", "手动设置时间");
       return;
     }
 
@@ -623,10 +712,15 @@
       if (!confirm("确定重置当前会话状态吗？")) return;
       state = { ...DEFAULT_STATE };
       commitState();
+      return;
+    }
+
+    if (c === "6") {
+      const injected = window.storyTimeDebug?.injected ? "成功" : "失败/未知";
+      alert(`提示词注入状态：${injected}\n你也可以在控制台输入 window.storyTimeDebug 查看详细内容。`);
     }
   }
 
-  // ---------- 观察器 ----------
   function bindChatObserver(chat) {
     if (chatObserver) {
       chatObserver.disconnect();
@@ -636,7 +730,6 @@
     currentChatEl = chat;
     if (!chat) return;
 
-    // 不重算历史
     chat.querySelectorAll(".mes").forEach((el) => processedMes.add(el));
 
     chatObserver = new MutationObserver((mutations) => {
@@ -666,7 +759,6 @@
     ensureBar();
   }
 
-  // ---------- 启动 ----------
   function boot() {
     chatKey = getChatKey();
     loadState();
@@ -684,7 +776,7 @@
       }
     }, 800);
 
-    console.log("[Story Time v0.25] loaded.");
+    console.log("[Story Time v0.26] loaded.");
   }
 
   if (document.readyState === "loading") {

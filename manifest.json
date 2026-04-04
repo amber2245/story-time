@@ -1,9 +1,9 @@
 {
   "name": "story_time",
   "display_name": "Story Time",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "author": "夏初晴",
-  "description": "AI story timeline tracker (layered local inference)",
+  "description": "AI story timeline tracker with layered local inference and prompt injection",
   "js": "index.js",
   "css": "style.css",
   "loading_order": 20,
