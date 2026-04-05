@@ -6,10 +6,13 @@
   // 你要的模式：先出char回复，再结算时间
   const ADVANCE_MODE = "assistant_only"; // assistant_only | both | user_only
 
-  // 流式输出稳定检测（避免中途结算）
-  const STABLE_CHECK_INTERVAL = 450; // ms
-  const STABLE_CONFIRM_COUNT = 2;    // 连续2次文本不变
-  const STABLE_MAX_WAIT = 12000;     // 最长等待12秒
+const STABLE_CHECK_INTERVAL = 500; // ms
+const STABLE_CONFIRM_COUNT = 3;    // 连续3次文本不变才算稳定
+const STABLE_MAX_WAIT = 15000;     // 最长等待15秒
+
+// 新增：assistant最小稳定要求，避免“...”或太短文本被提前结算
+const ASSISTANT_MIN_SETTLE_WAIT = 2200; // 至少等2.2秒
+const ASSISTANT_MIN_CONTENT_LEN = 12;   // 至少12字再结算（可按你习惯调）
 
   const FESTIVALS = {
     "1-1": "元旦",
@@ -729,14 +732,30 @@
     return role === "assistant" || role === "user" || role === "unknown";
   }
 
-  function extractMessageText(mesEl) {
-    const t =
-      mesEl.querySelector(".mes_text")?.innerText ||
-      mesEl.querySelector(".message_text")?.innerText ||
-      mesEl.innerText ||
-      "";
-    return t.trim();
-  }
+function normalizeJudgeText(text) {
+  return (text || "")
+    .replace(/Thought for[^\n]*\n?/gi, "") // 去掉思考条
+    .replace(/[ \t\r]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function isPlaceholderText(text) {
+  const t = normalizeJudgeText(text);
+  if (!t) return true;
+  if (/^(\.{2,}|…+|—+|[-~_]+)$/.test(t)) return true; // ... 之类
+  if (/^(typing|正在输入|思考中|生成中)$/i.test(t)) return true;
+  return false;
+}
+
+ function extractMessageText(mesEl) {
+  const t =
+    mesEl.querySelector(".mes_text")?.innerText ||
+    mesEl.querySelector(".message_text")?.innerText ||
+    mesEl.innerText ||
+    "";
+  return normalizeJudgeText(t);
+}
 
   function queueMesForSettlement(mesEl) {
     if (!mesEl || processedMes.has(mesEl)) return;
@@ -758,63 +777,89 @@
     pendingStableCheck.set(mesEl, rec);
   }
 
-  function stableTick(mesEl) {
-    if (!mesEl || processedMes.has(mesEl)) return;
+ function stableTick(mesEl) {
+  if (!mesEl || processedMes.has(mesEl)) return;
 
-    const rec = pendingStableCheck.get(mesEl);
-    if (!rec) return;
+  const rec = pendingStableCheck.get(mesEl);
+  if (!rec) return;
 
-    const text = extractMessageText(mesEl);
-    const waited = Date.now() - rec.startedAt;
+  const role = getMesRole(mesEl);
+  const rawText = extractMessageText(mesEl);
+  const text = normalizeJudgeText(rawText);
+  const waited = Date.now() - rec.startedAt;
 
-    if (!text) {
-      if (waited > STABLE_MAX_WAIT) {
-        pendingStableCheck.delete(mesEl);
-      } else {
-        rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
-      }
-      return;
-    }
+  const isAssistant = role === "assistant";
+  const minWait = isAssistant ? ASSISTANT_MIN_SETTLE_WAIT : 0;
+  const minLen = isAssistant ? ASSISTANT_MIN_CONTENT_LEN : 1;
 
-    if (text === rec.lastText) rec.stableCount += 1;
-    else {
-      rec.lastText = text;
-      rec.stableCount = 0;
-    }
-
-    const stableEnough = rec.stableCount >= STABLE_CONFIRM_COUNT;
-    const timeout = waited > STABLE_MAX_WAIT;
-
-    if (stableEnough || timeout) {
+  if (!text || isPlaceholderText(text)) {
+    if (waited > STABLE_MAX_WAIT) {
       pendingStableCheck.delete(mesEl);
-      processMesElement(mesEl);
+    } else {
+      rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
+    }
+    return;
+  }
+
+  // assistant 文本太短且等待时间不够：继续等，防止提早结算
+  if (isAssistant && (text.length < minLen || waited < minWait)) {
+    rec.lastText = text;
+    rec.stableCount = 0;
+    rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
+    return;
+  }
+
+  if (text === rec.lastText) rec.stableCount += 1;
+  else {
+    rec.lastText = text;
+    rec.stableCount = 0;
+  }
+
+  const stableEnough = rec.stableCount >= STABLE_CONFIRM_COUNT && waited >= minWait;
+  const timeout = waited > STABLE_MAX_WAIT;
+
+  if (stableEnough || timeout) {
+    // 超时时仍太短就放弃本次，避免+1噪声
+    if (isAssistant && text.length < Math.max(6, minLen - 4)) {
+      pendingStableCheck.delete(mesEl);
       return;
     }
 
-    rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
+    pendingStableCheck.delete(mesEl);
+    processMesElement(mesEl);
+    return;
   }
+
+  rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
+}
 
   function processMesElement(mesEl) {
-    if (!mesEl || processedMes.has(mesEl)) return;
+  if (!mesEl || processedMes.has(mesEl)) return;
 
-    const role = getMesRole(mesEl);
-    if (!shouldProcessRole(role)) return;
+  const role = getMesRole(mesEl);
+  if (!shouldProcessRole(role)) return;
 
-    const text = extractMessageText(mesEl);
-    if (!text) return;
+  const text = extractMessageText(mesEl);
+  if (!text || isPlaceholderText(text)) return;
 
+  // assistant过短文本（如“嗯”）默认不推动时间，避免机械+1
+  if (role === "assistant" && text.length < 8) {
     processedMes.add(mesEl);
-
-    tryParseWeather(text);
-    tryParseDate(text);
-
-    if (tryParseAbsoluteTime(text)) return;
-    if (tryParsePeriodAnchor(text)) return;
-
-    const estimation = estimateMinutesByText(text);
-    recordTransition(estimation.delta, estimation.reason, text);
-    applyDelta(estimation.delta);
+    return;
   }
+
+  processedMes.add(mesEl);
+
+  tryParseWeather(text);
+  tryParseDate(text);
+
+  if (tryParseAbsoluteTime(text)) return;
+  if (tryParsePeriodAnchor(text)) return;
+
+  const estimation = estimateMinutesByText(text);
+  recordTransition(estimation.delta, estimation.reason, text);
+  applyDelta(estimation.delta);
+}
 
   // ---------- 设置 ----------
   function openSettings() {
