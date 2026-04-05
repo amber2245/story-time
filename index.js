@@ -32,6 +32,8 @@
   let currentChatEl = null;
   let chatObserver = null;
   const processedMes = new WeakSet();
+  const TIME_FLOW_SOURCE = "assistant"; // "assistant" | "both" | "user"
+const finalizeTimers = new WeakMap();
 
   function getContextSafe() {
     try {
@@ -691,6 +693,107 @@
     return t.trim();
   }
 
+  function getMesRole(mesEl) {
+  if (!mesEl) return "unknown";
+  if (mesEl.classList?.contains("is_user")) return "user";
+  if (mesEl.classList?.contains("is_system")) return "system";
+
+  const raw =
+    mesEl.getAttribute("is_user") ??
+    mesEl.dataset?.is_user ??
+    "";
+  const v = String(raw).toLowerCase();
+  if (v === "true" || v === "1") return "user";
+
+  return "assistant";
+}
+
+function shouldAutoAdvanceFromRole(role) {
+  if (TIME_FLOW_SOURCE === "both") return role === "user" || role === "assistant";
+  if (TIME_FLOW_SOURCE === "user") return role === "user";
+  return role === "assistant"; // 默认：只吃 char 回复
+}
+
+function hasHardAnchor(text) {
+  return /([01]?\d|2[0-3])[:：]([0-5]\d)|([01]?\d|2[0-3])\s*点|第二天|次日|翌日|隔天|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|下雨|小雨|大雨|雷阵雨|下雪|晴天|多云|阴天|雾天/.test(text);
+}
+
+function processFinalMes(mesEl) {
+  if (!mesEl || processedMes.has(mesEl)) return;
+
+  const text = extractMessageText(mesEl);
+  if (!text) return;
+
+  const role = getMesRole(mesEl);
+
+  // 非自动推进来源：只允许“硬锚点”修正（可选）
+  if (!shouldAutoAdvanceFromRole(role)) {
+    if (role === "user" && hasHardAnchor(text)) {
+      tryParseWeather(text);
+      tryParseDate(text);
+      if (!tryParseAbsoluteTime(text)) tryParsePeriodAnchor(text);
+    }
+    processedMes.add(mesEl);
+    return;
+  }
+
+  // 自动推进来源（默认 assistant）
+  tryParseWeather(text);
+  tryParseDate(text);
+
+  if (tryParseAbsoluteTime(text)) {
+    processedMes.add(mesEl);
+    return;
+  }
+  if (tryParsePeriodAnchor(text)) {
+    processedMes.add(mesEl);
+    return;
+  }
+
+  const estimation = estimateMinutesByText(text);
+  recordTransition(estimation.delta, `${role}_${estimation.reason}`, text);
+  applyDelta(estimation.delta);
+
+  processedMes.add(mesEl);
+}
+
+function scheduleMesFinalize(mesEl) {
+  if (!mesEl || processedMes.has(mesEl)) return;
+  if (!mesEl.classList?.contains("mes")) return;
+
+  let lastText = "";
+  let stableCount = 0;
+
+  const tick = () => {
+    if (processedMes.has(mesEl)) return;
+
+    const nowText = extractMessageText(mesEl);
+    if (!nowText) {
+      finalizeTimers.set(mesEl, setTimeout(tick, 700));
+      return;
+    }
+
+    if (nowText === lastText) {
+      stableCount += 1;
+    } else {
+      lastText = nowText;
+      stableCount = 0;
+    }
+
+    // 连续两次不变，认为流式输出结束
+    if (stableCount >= 2) {
+      processFinalMes(mesEl);
+      return;
+    }
+
+    finalizeTimers.set(mesEl, setTimeout(tick, 700));
+  };
+
+  const old = finalizeTimers.get(mesEl);
+  if (old) clearTimeout(old);
+  finalizeTimers.set(mesEl, setTimeout(tick, 900));
+}
+
   function processMesElement(mesEl) {
     if (!mesEl || processedMes.has(mesEl)) return;
 
@@ -799,7 +902,6 @@
             setTimeout(() => processMesElement(node), 350);
             setTimeout(() => processMesElement(node), 1200);
           }
-
           node.querySelectorAll?.(".mes").forEach((el) => {
             setTimeout(() => processMesElement(el), 350);
             setTimeout(() => processMesElement(el), 1200);
