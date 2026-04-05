@@ -3,6 +3,14 @@
 
   const EXT_ID = "story_time";
 
+  // 你要的模式：先出char回复，再结算时间
+  const ADVANCE_MODE = "assistant_only"; // assistant_only | both | user_only
+
+  // 流式输出稳定检测（避免中途结算）
+  const STABLE_CHECK_INTERVAL = 450; // ms
+  const STABLE_CONFIRM_COUNT = 2;    // 连续2次文本不变
+  const STABLE_MAX_WAIT = 12000;     // 最长等待12秒
+
   const FESTIVALS = {
     "1-1": "元旦",
     "2-14": "情人节",
@@ -20,15 +28,10 @@
     minutes: 7 * 60 + 30,
     weather: "晴",
     autoWeather: true,
-
     lastDeltaMinutes: 0,
     lastDeltaReason: "",
     lastTriggerText: "",
-    lastTransitionLabel: "",
-
-    // 时间结算来源：assistant | both | user
-    // 默认 assistant：先出char，再结算时间
-    timeFlowSource: "assistant"
+    lastTransitionLabel: ""
   };
 
   let state = { ...DEFAULT_STATE };
@@ -37,9 +40,9 @@
   let currentChatEl = null;
   let chatObserver = null;
   const processedMes = new WeakSet();
-  const finalizeTimers = new WeakMap();
+  const pendingStableCheck = new WeakMap();
 
-  // ---------- Context ----------
+  // ---------- 基础 ----------
   function getContextSafe() {
     try {
       if (window.SillyTavern?.getContext) return window.SillyTavern.getContext();
@@ -72,7 +75,6 @@
     return `${EXT_ID}:${path}`;
   }
 
-  // ---------- Storage ----------
   function loadState() {
     const raw = localStorage.getItem(chatKey);
     if (!raw) {
@@ -90,7 +92,6 @@
     localStorage.setItem(chatKey, JSON.stringify(state));
   }
 
-  // ---------- Date & Time ----------
   function daysInMonth(year, month) {
     if (month === 2) return 28;
     if ([4, 6, 9, 11].includes(month)) return 30;
@@ -133,8 +134,12 @@
   }
 
   function shiftDate(days) {
-    if (days > 0) for (let i = 0; i < days; i++) advanceOneDay();
-    if (days < 0) for (let i = 0; i < Math.abs(days); i++) backOneDay();
+    if (days > 0) {
+      for (let i = 0; i < days; i++) advanceOneDay();
+    }
+    if (days < 0) {
+      for (let i = 0; i < Math.abs(days); i++) backOneDay();
+    }
   }
 
   function normalizeTime() {
@@ -199,8 +204,16 @@
       if (phase === "傍晚") return "第二天傍晚";
       return `第二天${phase}`;
     }
-    if (delta >= 120) return `数小时后，已是${phase}`;
-    if (delta >= 30) return `${phase}稍晚些时候`;
+    if (delta >= 120) {
+      if (phase === "清晨" || phase === "上午") return "数小时后，已近早晨";
+      if (phase === "中午") return "数小时后，已到中午";
+      if (phase === "下午") return "数小时后，天色已亮";
+      if (phase === "傍晚") return "数小时后，已近傍晚";
+      return `数小时后，已是${phase}`;
+    }
+    if (delta >= 30) {
+      return `${phase}稍晚些时候`;
+    }
     return "";
   }
 
@@ -213,7 +226,7 @@
   function recordTransition(delta, reason, text) {
     state.lastDeltaMinutes = delta || 0;
     state.lastDeltaReason = reason || "";
-    state.lastTriggerText = (text || "").slice(0, 140);
+    state.lastTriggerText = (text || "").slice(0, 120);
     state.lastTransitionLabel = buildTransitionLabel(delta || 0, reason || "");
   }
 
@@ -289,7 +302,7 @@
     renderBar();
   }
 
-  // ---------- Prompt Injection ----------
+  // ---------- Prompt 注入 ----------
   function setExtensionPrompt(prompt) {
     const ctx = getContextSafe();
     if (!ctx) return false;
@@ -325,43 +338,64 @@
 
   function buildPrompt() {
     const festival = getFestival();
+    const deltaText = formatDelta(state.lastDeltaMinutes);
     const recentJump = state.lastDeltaMinutes >= 30;
+    const recentBigJump = state.lastDeltaMinutes >= 120;
     const weatherIsImportant = /小雨|中雨|雷阵雨|雪|雾/.test(state.weather);
     const festivalIsImportant = Boolean(festival) && /情人节|圣诞节|元旦|跨年夜/.test(festival);
 
     const dynamicRules = [];
-    if (recentJump) dynamicRules.push("最近发生了明显时间推进，可在本轮自然体现时段变化。");
-    else dynamicRules.push("最近没有明显跳时，不要刻意反复强调时段。");
 
-    if (weatherIsImportant) dynamicRules.push("天气会影响环境和行动时再描写，不必每轮重复。");
-    if (festivalIsImportant) dynamicRules.push("节日只在互动相关时提及，避免机械复读。");
+    if (recentJump) {
+      dynamicRules.push("最近发生了明显时间推进，请在正文开头或前半段自然体现时段变化。");
+    } else {
+      dynamicRules.push("最近没有明显时间跳跃，不要刻意反复强调当前时段。");
+    }
+
+    if (recentBigJump || state.lastDeltaReason === "sleep") {
+      dynamicRules.push("若刚经历睡眠、过夜或数小时跳时，可使用“第二天清晨”“数小时后”“天已经亮了”等表达。");
+    }
+
+    if (weatherIsImportant) {
+      dynamicRules.push("当前天气对环境和行动有实际影响，可在需要时体现体感、声音、地面、视线或出行准备。");
+    } else {
+      dynamicRules.push("天气作为背景常识即可，除非场景需要，否则不要每轮都提。");
+    }
+
+    if (festivalIsImportant) {
+      dynamicRules.push("节日只在互动、气氛或安排确实相关时再提，不要机械重复节日本身。");
+    } else {
+      dynamicRules.push("日期和节日通常保持为背景信息，不必主动反复提及。");
+    }
 
     return `[剧情状态]
 - 当前时间: ${hhmm(state.minutes)}（${getPhase(state.minutes)}）
 - 当前日期: ${state.month}月${state.day}日
 - 当前天气: ${state.weather}
 - 当前节日: ${festival || "无"}
-- 时段倾向: ${getMealHint(state.minutes)}
-- 最近时间变化: ${formatDelta(state.lastDeltaMinutes)}
+- 当前时段倾向: ${getMealHint(state.minutes)}
+- 最近时间变化: ${deltaText}
 - 最近变化原因: ${state.lastDeltaReason || "无"}
 - 最近触发内容: ${state.lastTriggerText || "无"}
 - 建议表现: ${state.lastTransitionLabel || "无需特别强调"}
-- 时间结算来源: ${state.timeFlowSource}
 
 [写作原则]
-1) 始终遵守当前时间/天气/日期，但不要每轮机械复读。
-2) 仅在它们影响场景、行为、情绪、体感、出行时自然体现。
-3) 若上一条已体现过时段/天气/节日，本条通常应收敛。
-4) 除非剧情明确再次跳时，不要擅自大幅改动时间。
+1. 始终知晓当前时间、天气、日期和节日，并让角色行为、作息和环境符合这些状态。
+2. 不要每次回复都重复提及时间、天气或节日；只有当它们正在影响场景、行为、情绪、光线、体感、安排时，才自然表现出来。
+3. 若上一条已经明显表现过时段、天气或节日，本条除非剧情有新变化，否则应收敛，不要机械复读。
+4. 时间信息优先影响作息与行动逻辑，例如早晨适合苏醒、洗漱、早餐、出门准备；中午适合午餐与日照最亮；傍晚适合暮色、归家、晚餐；深夜适合安静、困意与休息。
+5. 天气信息优先影响环境、声音、光线、体感与出行准备，例如下雨可能带来雨声、潮气、湿地面、带伞需求，但不必每轮都写。
+6. 节日信息默认只是背景，不要把它当作每条都必须出现的主题；只有当人物真的会因此改变安排、情绪或互动时，再体现出来。
+7. 除非剧情明确再次发生时间跳跃，否则不要擅自额外大幅改变时间。
 
-[本轮提醒]
+[本轮额外提醒]
 - ${dynamicRules.join("\n- ")}`;
   }
 
   function refreshModelState() {
     const prompt = buildPrompt();
-    const ctx = getContextSafe();
     const ok = setExtensionPrompt(prompt);
+    const ctx = getContextSafe();
 
     window.storyTimeDebug = {
       chatKey,
@@ -372,7 +406,7 @@
     };
   }
 
-  // ---------- Time Logic ----------
+  // ---------- 时间逻辑 ----------
   function applyDelta(delta) {
     if (!delta || Number.isNaN(delta)) return;
     state.minutes += delta;
@@ -381,10 +415,10 @@
   }
 
   function setAbsoluteTime(h, m, reason = "absolute_time", text = "") {
-    const old = state.minutes;
+    const oldMinutes = state.minutes;
     state.minutes = h * 60 + m;
     normalizeTime();
-    recordTransition(state.minutes - old, reason, text);
+    recordTransition(state.minutes - oldMinutes, reason, text);
     commitState();
   }
 
@@ -414,6 +448,7 @@
       const ones = parts[1] ? (map[parts[1]] || 0) : 0;
       return tens * 10 + ones;
     }
+
     return NaN;
   }
 
@@ -530,13 +565,14 @@
       if (!rule.reg.test(text)) continue;
       count += 1;
 
-      let [min, max] = rule.range;
+      let min = rule.range[0];
+      let max = rule.range[1];
 
       if (rule.name === "meal") {
         const current = state.minutes;
-        if (current >= 330 && current <= 570) [min, max] = [15, 30];
-        else if (current >= 660 && current <= 870) [min, max] = [25, 45];
-        else if (current >= 1020 && current <= 1260) [min, max] = [30, 55];
+        if (current >= 330 && current <= 570) { min = 15; max = 30; }
+        else if (current >= 660 && current <= 870) { min = 25; max = 45; }
+        else if (current >= 1020 && current <= 1260) { min = 30; max = 55; }
       }
 
       minutes += pickRange(min, max, `${text}|${rule.name}|${state.minutes}`);
@@ -577,10 +613,12 @@
     const clean = text.replace(/\s+/g, "");
     const len = clean.length;
     let base = 1;
+
     if (len <= 6) base = 1;
     else if (len <= 25) base = 2;
     else if (len <= 80) base = 3;
     else base = 4;
+
     const jitter = hashText(clean) % 2;
     return base + jitter;
   }
@@ -613,14 +651,15 @@
       reason = "fallback_chat";
     }
 
-    return { delta: Math.min(total, 360), reason: reason || "generic_progress" };
+    return {
+      delta: Math.min(total, 360),
+      reason: reason || "generic_progress"
+    };
   }
 
-  // ---------- Weather / Date Parse ----------
   function tryParseDate(text) {
     const m = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]/);
     if (!m) return false;
-
     const mm = parseInt(m[1], 10);
     const dd = parseInt(m[2], 10);
     if (mm < 1 || mm > 12) return false;
@@ -649,7 +688,47 @@
     return true;
   }
 
-  // ---------- Message flow (核心改动：先出assistant，再结算) ----------
+  // ---------- 角色识别 & 稳定结算 ----------
+  function parseBoolFlag(v) {
+    if (v === true || v === "true" || v === 1 || v === "1") return true;
+    if (v === false || v === "false" || v === 0 || v === "0") return false;
+    return null;
+  }
+
+  function getMesRole(mesEl) {
+    if (!mesEl) return "unknown";
+
+    const raw =
+      mesEl.getAttribute("is_user") ??
+      mesEl.dataset?.isUser ??
+      mesEl.dataset?.is_user;
+
+    const flag = parseBoolFlag(raw);
+    if (flag === true) return "user";
+    if (flag === false) return "assistant";
+
+    if (mesEl.classList?.contains("system_mes")) return "system";
+    if (mesEl.classList?.contains("user_mes") || mesEl.classList?.contains("mes_user")) return "user";
+
+    const name =
+      mesEl.querySelector(".name_text")?.textContent?.trim() ||
+      mesEl.querySelector(".mes_name")?.textContent?.trim() ||
+      "";
+
+    const ctx = getContextSafe();
+    if (name && ctx?.name1 && name === ctx.name1) return "user";
+    if (name && ctx?.name2 && name === ctx.name2) return "assistant";
+
+    return "unknown";
+  }
+
+  function shouldProcessRole(role) {
+    if (role === "system") return false;
+    if (ADVANCE_MODE === "assistant_only") return role === "assistant";
+    if (ADVANCE_MODE === "user_only") return role === "user";
+    return role === "assistant" || role === "user" || role === "unknown";
+  }
+
   function extractMessageText(mesEl) {
     const t =
       mesEl.querySelector(".mes_text")?.innerText ||
@@ -659,132 +738,91 @@
     return t.trim();
   }
 
-  function getMesRole(mesEl) {
-    if (!mesEl) return "unknown";
-
-    // class 识别
-    const cl = mesEl.classList;
-    if (cl?.contains("is_user") || cl?.contains("user_mes") || cl?.contains("mes_user")) return "user";
-    if (cl?.contains("is_system") || cl?.contains("system_mes")) return "system";
-
-    // attr/dataset 识别
-    const v1 = String(mesEl.getAttribute("is_user") ?? "").toLowerCase();
-    const v2 = String(mesEl.dataset?.is_user ?? "").toLowerCase();
-    if (v1 === "true" || v1 === "1" || v2 === "true" || v2 === "1") return "user";
-
-    // 名称辅助识别
-    const ctx = getContextSafe();
-    const nameEl = mesEl.querySelector(".ch_name");
-    const n = (nameEl?.textContent || "").trim();
-    if (n && ctx?.name1 && n === String(ctx.name1).trim()) return "user";
-
-    return "assistant";
-  }
-
-  function shouldAutoAdvanceFromRole(role) {
-    const source = state.timeFlowSource || "assistant";
-    if (source === "both") return role === "assistant" || role === "user";
-    if (source === "user") return role === "user";
-    return role === "assistant"; // 默认只assistant
-  }
-
-  function hasHardAnchor(text) {
-    if (!text) return false;
-    return /([01]?\d|2[0-3])[:：]([0-5]\d)|([01]?\d|2[0-3])\s*点|第二天|次日|翌日|隔天|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|雷阵雨|大雨|小雨|下雨|下雪|晴天|多云|阴天|雾天/.test(text);
-  }
-
-  function markProcessed(mesEl) {
-    processedMes.add(mesEl);
-    const t = finalizeTimers.get(mesEl);
-    if (t) {
-      clearTimeout(t);
-      finalizeTimers.delete(mesEl);
-    }
-  }
-
-  function processFinalMes(mesEl) {
+  function queueMesForSettlement(mesEl) {
     if (!mesEl || processedMes.has(mesEl)) return;
+
+    const role = getMesRole(mesEl);
+    if (!shouldProcessRole(role)) return;
+
+    const old = pendingStableCheck.get(mesEl);
+    if (old?.timer) clearTimeout(old.timer);
+
+    const rec = old || {
+      startedAt: Date.now(),
+      lastText: "",
+      stableCount: 0,
+      timer: null
+    };
+
+    rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
+    pendingStableCheck.set(mesEl, rec);
+  }
+
+  function stableTick(mesEl) {
+    if (!mesEl || processedMes.has(mesEl)) return;
+
+    const rec = pendingStableCheck.get(mesEl);
+    if (!rec) return;
+
+    const text = extractMessageText(mesEl);
+    const waited = Date.now() - rec.startedAt;
+
+    if (!text) {
+      if (waited > STABLE_MAX_WAIT) {
+        pendingStableCheck.delete(mesEl);
+      } else {
+        rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
+      }
+      return;
+    }
+
+    if (text === rec.lastText) rec.stableCount += 1;
+    else {
+      rec.lastText = text;
+      rec.stableCount = 0;
+    }
+
+    const stableEnough = rec.stableCount >= STABLE_CONFIRM_COUNT;
+    const timeout = waited > STABLE_MAX_WAIT;
+
+    if (stableEnough || timeout) {
+      pendingStableCheck.delete(mesEl);
+      processMesElement(mesEl);
+      return;
+    }
+
+    rec.timer = setTimeout(() => stableTick(mesEl), STABLE_CHECK_INTERVAL);
+  }
+
+  function processMesElement(mesEl) {
+    if (!mesEl || processedMes.has(mesEl)) return;
+
+    const role = getMesRole(mesEl);
+    if (!shouldProcessRole(role)) return;
 
     const text = extractMessageText(mesEl);
     if (!text) return;
 
-    const role = getMesRole(mesEl);
+    processedMes.add(mesEl);
 
-    // 非自动推进来源：只处理硬锚点（可手动校时/校天气）
-    if (!shouldAutoAdvanceFromRole(role)) {
-      if (role === "user" && hasHardAnchor(text)) {
-        tryParseWeather(text);
-        tryParseDate(text);
-        if (!tryParseAbsoluteTime(text)) tryParsePeriodAnchor(text);
-      }
-      markProcessed(mesEl);
-      return;
-    }
-
-    // 自动推进来源（默认assistant）
     tryParseWeather(text);
     tryParseDate(text);
 
-    if (tryParseAbsoluteTime(text)) {
-      markProcessed(mesEl);
-      return;
-    }
-    if (tryParsePeriodAnchor(text)) {
-      markProcessed(mesEl);
-      return;
-    }
+    if (tryParseAbsoluteTime(text)) return;
+    if (tryParsePeriodAnchor(text)) return;
 
     const estimation = estimateMinutesByText(text);
-    recordTransition(estimation.delta, `${role}_${estimation.reason}`, text);
+    recordTransition(estimation.delta, estimation.reason, text);
     applyDelta(estimation.delta);
-
-    markProcessed(mesEl);
   }
 
-  function scheduleMesFinalize(mesEl) {
-    if (!mesEl || processedMes.has(mesEl)) return;
-    if (!mesEl.classList?.contains("mes")) return;
-
-    let lastText = "";
-    let stableCount = 0;
-
-    const tick = () => {
-      if (!document.body.contains(mesEl)) return;
-      if (processedMes.has(mesEl)) return;
-
-      const nowText = extractMessageText(mesEl);
-      if (!nowText) {
-        finalizeTimers.set(mesEl, setTimeout(tick, 700));
-        return;
-      }
-
-      if (nowText === lastText) stableCount += 1;
-      else {
-        lastText = nowText;
-        stableCount = 0;
-      }
-
-      // 连续稳定 3 次：认为流式输出结束
-      if (stableCount >= 3) {
-        processFinalMes(mesEl);
-        return;
-      }
-
-      finalizeTimers.set(mesEl, setTimeout(tick, 700));
-    };
-
-    const old = finalizeTimers.get(mesEl);
-    if (old) clearTimeout(old);
-    finalizeTimers.set(mesEl, setTimeout(tick, 900));
-  }
-
-  // ---------- Settings ----------
+  // ---------- 设置 ----------
   function openSettings() {
     const menu = prompt(
 `Story Time 设置
 当前：${hhmm(state.minutes)} | ${state.month}月${state.day}日 | ${state.weather}
 自动天气：${state.autoWeather ? "开" : "关"}
-时间结算来源：${state.timeFlowSource}
+结算模式：${ADVANCE_MODE}
 当前会话Key：${chatKey}
 
 1 设置时间(HH:mm)
@@ -793,7 +831,6 @@
 4 切换自动天气
 5 重置当前会话状态
 6 查看注入状态
-7 设置时间结算来源（assistant/both/user）
 
 输入序号：`
     );
@@ -848,22 +885,10 @@
     if (c === "6") {
       const injected = window.storyTimeDebug?.injected ? "成功" : "失败/未知";
       alert(`提示词注入状态：${injected}\n当前会话Key：${chatKey}`);
-      return;
-    }
-
-    if (c === "7") {
-      const v = prompt("输入 assistant / both / user", state.timeFlowSource || "assistant");
-      if (!v) return;
-      const vv = v.trim().toLowerCase();
-      if (!["assistant", "both", "user"].includes(vv)) return alert("仅支持 assistant / both / user");
-      state.timeFlowSource = vv;
-      commitState();
-      alert(`时间结算来源已设置为：${vv}`);
-      return;
     }
   }
 
-  // ---------- Observer ----------
+  // ---------- 观察器 ----------
   function bindChatObserver(chat) {
     if (chatObserver) {
       chatObserver.disconnect();
@@ -873,26 +898,43 @@
     currentChatEl = chat;
     if (!chat) return;
 
-    // 避免启动时重算历史
+    // 历史消息不重算
     chat.querySelectorAll(".mes").forEach((el) => processedMes.add(el));
 
     chatObserver = new MutationObserver((mutations) => {
       for (const m of mutations) {
-        for (const node of m.addedNodes) {
-          if (!(node instanceof HTMLElement)) continue;
+        if (m.type === "childList") {
+          for (const node of m.addedNodes) {
+            if (!(node instanceof HTMLElement)) continue;
 
-          if (node.classList?.contains("mes")) {
-            scheduleMesFinalize(node);
+            if (node.classList?.contains("mes")) {
+              queueMesForSettlement(node);
+            }
+
+            node.querySelectorAll?.(".mes").forEach((el) => queueMesForSettlement(el));
           }
+        }
 
-          node.querySelectorAll?.(".mes").forEach((el) => {
-            scheduleMesFinalize(el);
-          });
+        if (m.type === "characterData") {
+          const p = m.target?.parentElement;
+          const mes = p?.closest?.(".mes");
+          if (mes) queueMesForSettlement(mes);
+        }
+
+        if (m.type === "attributes") {
+          const t = m.target instanceof HTMLElement ? m.target : m.target?.parentElement;
+          const mes = t?.closest?.(".mes");
+          if (mes) queueMesForSettlement(mes);
         }
       }
     });
 
-    chatObserver.observe(chat, { childList: true, subtree: true });
+    chatObserver.observe(chat, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true
+    });
   }
 
   function ensureChatBinding() {
@@ -901,7 +943,7 @@
     ensureBar();
   }
 
-  // ---------- Boot ----------
+  // ---------- 启动 ----------
   function boot() {
     chatKey = getChatKey();
     loadState();
