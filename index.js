@@ -319,13 +319,25 @@
   }
 
   function extractMessageText(mesEl) {
-    const t =
-      mesEl.querySelector(".mes_text")?.innerText ||
-      mesEl.querySelector(".message_text")?.innerText ||
-      mesEl.innerText ||
-      "";
-    return String(t || "").trim();
+  if (!mesEl) return "";
+
+  // 只取正文，不取整条mes，避免把“消息头日期/用户名/思维标签”读进去
+  const selectors = [
+    ".mes_text",
+    ".message_text",
+    ".mes_block .mes_text",
+    ".swipe_right .mes_text",
+    ".swipe_left .mes_text"
+  ];
+
+  for (const sel of selectors) {
+    const el = mesEl.querySelector(sel);
+    const t = el?.innerText?.trim();
+    if (t) return t;
   }
+
+  return "";
+}
 
   function isUserMessage(mesEl) {
     if (!mesEl) return false;
@@ -418,19 +430,26 @@
   }
 
   const CATEGORY_RULES = [
-    { name: "meal", reg: /(吃(完|过|了)?(饭|早餐|早饭|午饭|中饭|午餐|晚饭|晚餐|宵夜)?|用餐|进餐)/, range: [18, 45], reason: "meal" },
-    { name: "cook", reg: /(做饭|下厨|烹饪|备餐|准备.*(饭|餐))/, range: [20, 50], reason: "cook" },
-    { name: "hygiene", reg: /(洗漱|刷牙|洗脸|梳洗|化妆|整理仪容|打理自己)/, range: [8, 20], reason: "hygiene" },
-    { name: "dress", reg: /(换(好)?衣服|更衣|穿好衣服|穿戴整齐)/, range: [6, 15], reason: "dress" },
-    { name: "commute", reg: /(出门|赶路|通勤|坐车|开车|乘车|打车|地铁|公交|骑车|步行前往|前往)/, range: [12, 45], reason: "commute" },
-    { name: "work_study", reg: /(上课|工作|学习|开会|训练|写作业|值班|处理文件)/, range: [35, 120], reason: "work_study" },
-    { name: "social", reg: /(约会|聚会|会面|拜访|长谈|闲聊了一会|聊了很久)/, range: [15, 60], reason: "social" },
-    { name: "shopping", reg: /(购物|采购|逛街|商场|买菜)/, range: [20, 90], reason: "shopping" },
-    { name: "exercise", reg: /(跑步|锻炼|健身|打球|游泳|运动)/, range: [20, 80], reason: "exercise" },
-    { name: "rest", reg: /(休息|小憩|午睡|躺一会|闭目养神)/, range: [10, 50], reason: "rest" },
-    { name: "sleep", reg: /(睡觉|入睡|睡着|过夜|补觉)/, range: [360, 540], reason: "sleep" },
-    { name: "medical", reg: /(包扎|治疗|看医生|就诊|输液|护理)/, range: [20, 90], reason: "medical" }
-  ];
+  {
+    name: "meal",
+    // 收紧：不再用“吃”单字触发，避免“吃醋/吃惊”等误判
+    reg: /(吃(完|过|了)?(饭|早餐|早饭|午饭|中饭|午餐|晚饭|晚餐|宵夜|东西|点心|甜点|面|粉|菜)|用餐|进餐)/,
+    range: [18, 45],
+    reason: "meal"
+  },
+  { name: "cook", reg: /(做饭|下厨|烹饪|备餐|准备.*(饭|餐))/, range: [20, 50], reason: "cook" },
+  { name: "hygiene", reg: /(洗漱|刷牙|洗脸|梳洗|化妆|整理仪容|打理自己)/, range: [8, 20], reason: "hygiene" },
+  { name: "dress", reg: /(换(好)?衣服|更衣|穿好衣服|穿戴整齐)/, range: [6, 15], reason: "dress" },
+  // 收紧：去掉过宽的“前往”
+  { name: "commute", reg: /(出门|赶路|通勤|坐车|开车|乘车|打车|地铁|公交|骑车|步行前往)/, range: [12, 45], reason: "commute" },
+  { name: "work_study", reg: /(上课|工作|学习|开会|训练|写作业|值班|处理文件)/, range: [35, 120], reason: "work_study" },
+  { name: "social", reg: /(约会|聚会|会面|拜访|长谈|聊了很久)/, range: [15, 60], reason: "social" },
+  { name: "shopping", reg: /(购物|采购|逛街|商场|买菜)/, range: [20, 90], reason: "shopping" },
+  { name: "exercise", reg: /(跑步|锻炼|健身|打球|游泳|运动)/, range: [20, 80], reason: "exercise" },
+  { name: "rest", reg: /(休息|小憩|午睡|躺一会|闭目养神)/, range: [10, 50], reason: "rest" },
+  { name: "sleep", reg: /(睡觉|入睡|睡着|过夜|补觉)/, range: [360, 540], reason: "sleep" },
+  { name: "medical", reg: /(包扎|治疗|看医生|就诊|输液|护理)/, range: [20, 90], reason: "medical" }
+];
 
   function estimateCategoryMinutes(text, currentMinutes) {
     let minutes = 0;
@@ -488,63 +507,124 @@
   }
 
   function estimateContextBonus(text, recent) {
-    let bonus = 0;
-    let forcedMin = 0;
-    let reason = "";
+  let bonus = 0;
+  let forcedMin = 0;
+  let reason = "";
 
-    const leaveRe = /(准备出门|出门了|出发|动身|前往|赶去|上路)/;
-    const arriveRe = /(到了|到达|抵达|来到|进了|赶到|回到)/;
-    const mealPrepRe = /(做饭|下厨|点餐|准备吃|去吃|开饭|用餐前)/;
-    const mealDoneRe = /(吃完|吃过|饭后|用餐结束|用过餐)/;
-    const tiredRe = /(困|疲惫|倦意|打哈欠|眼皮打架|想睡|闭上眼|躺下)/;
-    const sleepRe = /(睡着|入睡|睡过去|昏睡|睡了过去)/;
-    const workStartRe = /(开始工作|开始学习|投入工作|上课了|忙起来)/;
-    const workEndRe = /(下班|下课|做完了|忙完了|告一段落|终于结束)/;
+  const leaveRe = /(准备出门|出门了|出发|动身|赶去|上路)/;
+  // 去掉裸“到了”，避免“想到了”误判
+  const arriveRe = /(到达|抵达|来到|赶到|回到|到了家|到了学校|到了公司|到了商场|到了车站|到了门口|到了目的地)/;
+  const mealPrepRe = /(做饭|下厨|点餐|准备吃|去吃|开饭|用餐前)/;
+  const mealDoneRe = /(吃完|吃过|饭后|用餐结束|用过餐)/;
+  const tiredRe = /(困|疲惫|倦意|打哈欠|眼皮打架|想睡|闭上眼|躺下)/;
+  const sleepRe = /(睡着|入睡|睡过去|昏睡|睡了过去)/;
+  const workStartRe = /(开始工作|开始学习|投入工作|上课了|忙起来)/;
+  const workEndRe = /(下班|下课|做完了|忙完了|告一段落|终于结束)/;
 
-    if (testReg(arriveRe, text) && recentHas(recent, leaveRe, 4)) {
-      bonus += pickRange(12, 40, text + "|travel_chain");
-      reason = reason || "travel_chain";
-    }
-
-    if (testReg(mealDoneRe, text) && recentHas(recent, mealPrepRe, 4)) {
-      bonus += pickRange(10, 25, text + "|meal_chain");
-      reason = reason || "meal_chain";
-    }
-
-    if (testReg(workEndRe, text) && recentHas(recent, workStartRe, 5)) {
-      bonus += pickRange(45, 140, text + "|work_cycle");
-      reason = reason || "work_cycle";
-    }
-
-    if (testReg(sleepRe, text) && recentHas(recent, tiredRe, 4)) {
-      forcedMin = Math.max(forcedMin, pickRange(300, 420, text + "|sleep_chain"));
-      reason = reason || "sleep_chain";
-    }
-
-    if (/(已经.*(吃完|做完|换好|收拾好|处理完|结束了))/.test(text)) {
-      bonus += pickRange(6, 20, text + "|result_clause");
-      reason = reason || "result_clause";
-    }
-
-    if (/(回过神来|再看时|不知何时|不知不觉已经)/.test(text)) {
-      bonus += pickRange(8, 24, text + "|implicit_elapsed");
-      reason = reason || "implicit_elapsed";
-    }
-
-    return { bonus, forcedMin, reason };
+  if (testReg(arriveRe, text) && recentHas(recent, leaveRe, 3)) {
+    bonus += pickRange(10, 30, text + "|travel_chain");
+    reason = reason || "travel_chain";
   }
 
-  function estimateFallbackMinutes(text) {
-    const clean = text.replace(/\s+/g, "");
-    const len = clean.length;
-    let base = 1;
-    if (len <= 6) base = 1;
-    else if (len <= 25) base = 2;
-    else if (len <= 80) base = 3;
-    else base = 4;
-    const jitter = hashText(clean) % 2;
-    return base + jitter;
+  if (testReg(mealDoneRe, text) && recentHas(recent, mealPrepRe, 3)) {
+    bonus += pickRange(8, 20, text + "|meal_chain");
+    reason = reason || "meal_chain";
   }
+
+  if (testReg(workEndRe, text) && recentHas(recent, workStartRe, 4)) {
+    bonus += pickRange(35, 90, text + "|work_cycle");
+    reason = reason || "work_cycle";
+  }
+
+  if (testReg(sleepRe, text) && recentHas(recent, tiredRe, 4)) {
+    forcedMin = Math.max(forcedMin, pickRange(300, 420, text + "|sleep_chain"));
+    reason = reason || "sleep_chain";
+  }
+
+  if (/(已经.*(吃完|做完|换好|收拾好|处理完|结束了))/.test(text)) {
+    bonus += pickRange(5, 15, text + "|result_clause");
+    reason = reason || "result_clause";
+  }
+
+  if (/(回过神来|再看时|不知何时|不知不觉已经)/.test(text)) {
+    bonus += pickRange(6, 18, text + "|implicit_elapsed");
+    reason = reason || "implicit_elapsed";
+  }
+
+  return { bonus, forcedMin, reason };
+}
+
+function isLightDialogue(text) {
+  const clean = String(text || "").replace(/\s+/g, "");
+  if (!clean) return true;
+
+  const hasExplicit = /(分钟|小时|第二天|次日|翌日|隔天|清晨|中午|傍晚|深夜)/.test(clean);
+  const hasAction = /(起床|洗漱|换衣|出门|到达|抵达|回到|吃饭|用餐|做饭|睡觉|入睡|工作|学习|赶路|开车|坐车|购物|运动)/.test(clean);
+
+  const quoteCount = (clean.match(/[“”"'「」]/g) || []).length;
+  const dialogueLike = quoteCount >= 2 || /^(?:[「“"'—-])/.test(clean);
+
+  return !hasExplicit && !hasAction && (dialogueLike || clean.length < 90);
+}
+
+ function estimateMinutesByText(text, currentMinutes, recent) {
+  if (!text) return { delta: 0, reason: "none", scalable: true };
+
+  const explicit = parseExplicitDuration(text);
+  const category = estimateCategoryMinutes(text, currentMinutes);
+  const narrative = estimateNarrativeMinutes(text);
+  const ctxBonus = estimateContextBonus(text, recent);
+
+  let total = 0;
+  let reason = "";
+  let scalable = true;
+
+  if (explicit.hit) {
+    total = explicit.minutes + Math.round((category.minutes + narrative.minutes) * 0.35) + Math.round(ctxBonus.bonus * 0.35);
+    reason = "explicit_duration";
+    scalable = false; // 明确时长不吃倍率
+  } else {
+    total = category.minutes + narrative.minutes + ctxBonus.bonus;
+    reason = category.reason || narrative.reason || ctxBonus.reason || "";
+
+    if (category.count >= 2 && total > 0) {
+      const factor = 1 + Math.min(0.25, (category.count - 1) * 0.08);
+      total = Math.round(total * factor);
+    }
+  }
+
+  if (ctxBonus.forcedMin > 0) {
+    total = Math.max(total, ctxBonus.forcedMin);
+    reason = reason || ctxBonus.reason || "context_chain";
+  }
+
+  // 轻闲聊限速：避免两轮闲聊就+30m
+  if (!explicit.hit && ctxBonus.forcedMin === 0 && isLightDialogue(text)) {
+    const lightCap = pickRange(1, 4, text + "|light_cap");
+    total = total > 0 ? Math.min(total, lightCap) : lightCap;
+    reason = "light_dialogue";
+  }
+
+  // 普通消息软上限（无强时间词时）
+  if (
+    !explicit.hit &&
+    ctxBonus.forcedMin === 0 &&
+    !/(第二天|次日|翌日|隔天|数小时|许久|良久|一整天|整夜)/.test(text)
+  ) {
+    total = Math.min(total, 18);
+  }
+
+  if (total <= 0) {
+    total = estimateFallbackMinutes(text);
+    reason = "fallback_chat";
+  }
+
+  return {
+    delta: Math.min(total, 240),
+    reason: reason || "generic_progress",
+    scalable
+  };
+}
 
   function estimateMinutesByText(text, currentMinutes, recent) {
     if (!text) return { delta: 0, reason: "none", scalable: true };
@@ -780,80 +860,80 @@
   }
 
   function recomputeTimeline() {
-    recomputeTimer = null;
+  recomputeTimer = null;
 
-    const chat = document.querySelector("#chat");
-    if (!chat) return;
+  const chat = document.querySelector("#chat");
+  if (!chat) return;
 
-    const now = Date.now();
-    const mesList = Array.from(chat.querySelectorAll(".mes"));
-    const aliveIds = new Set();
+  const now = Date.now();
+  const mesList = Array.from(chat.querySelectorAll(".mes"));
+  const aliveIds = new Set();
 
-    const settledAssistantMessages = [];
-    let hasUnsettledAssistant = false;
+  const settledAssistantMessages = [];
+  let hasUnsettledAssistant = false;
 
-    for (const mesEl of mesList) {
-      const id = ensureMsgId(mesEl);
-      aliveIds.add(id);
+  for (const mesEl of mesList) {
+    const id = ensureMsgId(mesEl);
+    aliveIds.add(id);
 
-      const text = extractMessageText(mesEl);
-      if (!text) continue;
+    const text = extractMessageText(mesEl);
+    if (!text) continue;
 
-      const h = hashText(text);
-      const rec = messageTrack.get(id);
+    const h = hashText(text);
+    const rec = messageTrack.get(id);
 
-      if (!rec) {
-        messageTrack.set(id, { hash: h, changedAt: now });
-      } else if (rec.hash !== h) {
-        rec.hash = h;
-        rec.changedAt = now;
-      }
-
-      if (!isAssistantMessage(mesEl)) continue;
-
-      const changedAt = messageTrack.get(id)?.changedAt ?? now;
-      const settled = now - changedAt >= SETTLE_MS;
-
-      if (!settled) {
-        hasUnsettledAssistant = true;
-        continue;
-      }
-
-      settledAssistantMessages.push({ id, text });
+    if (!rec) {
+      messageTrack.set(id, { hash: h, changedAt: now });
+    } else if (rec.hash !== h) {
+      rec.hash = h;
+      rec.changedAt = now;
     }
 
-    // 清理已不存在消息
-    for (const id of messageTrack.keys()) {
-      if (!aliveIds.has(id)) messageTrack.delete(id);
+    if (!isAssistantMessage(mesEl)) continue;
+
+    const changedAt = messageTrack.get(id)?.changedAt ?? now;
+    const settled = now - changedAt >= SETTLE_MS;
+
+    if (!settled) {
+      hasUnsettledAssistant = true;
+      continue;
     }
 
-    // 基于“已稳定的char消息”重算
-    const result = simulateFromAssistantMessages(settledAssistantMessages);
-
-    state.year = result.sim.year;
-    state.month = result.sim.month;
-    state.day = result.sim.day;
-    state.minutes = result.sim.minutes;
-    state.weather = result.sim.weather;
-
-    state.lastDeltaMinutes = result.lastDelta || 0;
-    state.lastDeltaReason = result.lastReason || "";
-    state.lastTriggerText = (result.lastText || "").slice(0, 120);
-    state.lastTransitionLabel = result.lastTransitionLabel || "";
-
-    const snap = snapshotState();
-    if (snap !== lastRenderedSnapshot) {
-      lastRenderedSnapshot = snap;
-      saveState();
-      renderBar();
-      refreshModelState(result.recent);
-    }
-
-    // 还有未稳定的 assistant 消息，继续等
-    if (hasUnsettledAssistant) {
-      scheduleRecompute(Math.max(400, Math.floor(SETTLE_MS * 0.5)));
-    }
+    settledAssistantMessages.push({ id, text });
   }
+
+  // 清理已不存在消息
+  for (const id of messageTrack.keys()) {
+    if (!aliveIds.has(id)) messageTrack.delete(id);
+  }
+
+  // 关键修复：只要有未稳定assistant消息，就不更新顶部时间条，避免流式乱跳
+  if (hasUnsettledAssistant) {
+    scheduleRecompute(Math.max(450, Math.floor(SETTLE_MS * 0.6)));
+    return;
+  }
+
+  const result = simulateFromAssistantMessages(settledAssistantMessages);
+
+  state.year = result.sim.year;
+  state.month = result.sim.month;
+  state.day = result.sim.day;
+  state.minutes = result.sim.minutes;
+  state.weather = result.sim.weather;
+
+  state.lastDeltaMinutes = result.lastDelta || 0;
+  state.lastDeltaReason = result.lastReason || "";
+  state.lastTriggerText = (result.lastText || "").slice(0, 120);
+  state.lastTransitionLabel = result.lastTransitionLabel || "";
+
+  const snap = snapshotState();
+  if (snap !== lastRenderedSnapshot) {
+    lastRenderedSnapshot = snap;
+    saveState();
+    renderBar();
+    refreshModelState(result.recent);
+  }
+}
 
   function scheduleRecompute(delay = 280) {
     if (recomputeTimer) clearTimeout(recomputeTimer);
@@ -1033,12 +1113,25 @@
     }
 
     const existing = chat.querySelector("#st-story-clock-bar");
-    if (existing) {
-      barEl = existing;
-      bindBarEvents();
-      renderBar();
-      return;
-    }
+if (existing) {
+  barEl = existing;
+
+  const controls = barEl.querySelector("#st-story-clock-controls");
+  if (controls && !controls.querySelector('[data-act="rate"]')) {
+    const rateBtn = document.createElement("button");
+    rateBtn.className = "st-story-clock-btn";
+    rateBtn.dataset.act = "rate";
+    rateBtn.textContent = formatRate(state.timeRate || 1);
+
+    const settingsBtn = controls.querySelector('[data-act="settings"]');
+    if (settingsBtn) controls.insertBefore(rateBtn, settingsBtn);
+    else controls.appendChild(rateBtn);
+  }
+
+  bindBarEvents();
+  renderBar();
+  return;
+}
 
     barEl = document.createElement("div");
     barEl.id = "st-story-clock-bar";
