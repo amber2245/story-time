@@ -3,6 +3,7 @@
 
   const EXT_ID = "story_time";
   const MAX_RECENT_TURNS = 8;
+  const MESSAGE_STABLE_DELAY = 1400;
 
   const FESTIVALS = {
     "1-1": "元旦",
@@ -32,10 +33,11 @@
   let barEl = null;
   let currentChatEl = null;
   let chatObserver = null;
-  const processedMes = new WeakSet();
   let recentTurns = [];
+  const processedMes = new WeakSet();
+  const pendingMesTimers = new WeakMap();
+  const pendingMesSnapshots = new WeakMap();
 
-  // ---------- 基础 ----------
   function getContextSafe() {
     try {
       if (window.SillyTavern?.getContext) return window.SillyTavern.getContext();
@@ -237,11 +239,6 @@
     return false;
   }
 
-  function recentSummary(limit = 4) {
-    return recentTurns.slice(-limit).map((x) => x.text).join(" | ");
-  }
-
-  // ---------- UI ----------
   function renderBar() {
     if (!barEl) return;
     const timeEl = barEl.querySelector("#st-story-clock-time");
@@ -307,7 +304,6 @@
     renderBar();
   }
 
-  // ---------- 注入 ----------
   function setExtensionPrompt(prompt) {
     const ctx = getContextSafe();
     if (!ctx) return false;
@@ -394,7 +390,6 @@
     };
   }
 
-  // ---------- 时间推进 ----------
   function applyDelta(delta, reason = "generic_progress", triggerText = "") {
     if (!delta || Number.isNaN(delta)) return;
     recordTransition(delta, reason, triggerText);
@@ -443,7 +438,6 @@
     return NaN;
   }
 
-  // Layer 1: 绝对锚点
   function tryParseAbsoluteTime(text) {
     let m = text.match(/([01]?\d|2[0-3])[:：]([0-5]\d)/);
     if (m) {
@@ -497,7 +491,6 @@
     return true;
   }
 
-  // Layer 2: 显式时长
   function parseExplicitDuration(text) {
     let minutes = 0;
     let hit = false;
@@ -534,7 +527,6 @@
     return { minutes, hit };
   }
 
-  // Layer 3: 事件类别
   const CATEGORY_RULES = [
     { name: "meal", reg: /(吃(完|过|了)?(饭|早餐|早饭|午饭|中饭|午餐|晚饭|晚餐|宵夜)?|用餐|进餐)/, range: [18, 45], reason: "meal" },
     { name: "cook", reg: /(做饭|下厨|烹饪|备餐|准备.*(饭|餐))/, range: [20, 50], reason: "cook" },
@@ -558,13 +550,22 @@
     for (const rule of CATEGORY_RULES) {
       if (!testReg(rule.reg, text)) continue;
       count += 1;
-      let [min, max] = rule.range;
+
+      let min = rule.range[0];
+      let max = rule.range[1];
 
       if (rule.name === "meal") {
         const current = state.minutes;
-        if (current >= 330 && current <= 570) [min, max] = [15, 30];
-        else if (current >= 660 && current <= 870) [min, max] = [25, 45];
-        else if (current >= 1020 && current <= 1260) [min, max] = [30, 55];
+        if (current >= 330 && current <= 570) {
+          min = 15;
+          max = 30;
+        } else if (current >= 660 && current <= 870) {
+          min = 25;
+          max = 45;
+        } else if (current >= 1020 && current <= 1260) {
+          min = 30;
+          max = 55;
+        }
       }
 
       minutes += pickRange(min, max, `${text}|${rule.name}|${state.minutes}`);
@@ -574,7 +575,6 @@
     return { minutes, count, reason: mainReason };
   }
 
-  // Layer 4: 叙事流逝
   function estimateNarrativeMinutes(text) {
     let n = 0;
     let reason = "";
@@ -599,7 +599,6 @@
     return { minutes: n, reason };
   }
 
-  // Layer 4.5: 上下文链加权（v0.28重点）
   function estimateContextBonus(text) {
     let bonus = 0;
     let forcedMin = 0;
@@ -647,7 +646,6 @@
     return { bonus, forcedMin, reason };
   }
 
-  // Layer 5: 兜底
   function estimateFallbackMinutes(text) {
     const clean = text.replace(/\s+/g, "");
     const len = clean.length;
@@ -656,8 +654,7 @@
     else if (len <= 25) base = 2;
     else if (len <= 80) base = 3;
     else base = 4;
-    const jitter = hashText(clean) % 2;
-    return base + jitter;
+    return base + (hashText(clean) % 2);
   }
 
   function estimateMinutesByText(text) {
@@ -678,6 +675,7 @@
     } else {
       total = category.minutes + narrative.minutes + contextBonus.bonus;
       reason = category.reason || narrative.reason || contextBonus.reason || "";
+
       if (category.count >= 2 && total > 0) {
         const factor = 1 + Math.min(0.35, (category.count - 1) * 0.1);
         total = Math.round(total * factor);
@@ -689,7 +687,6 @@
       if (!reason) reason = contextBonus.reason || "context_chain";
     }
 
-    // 如果上一条刚大跳时，这一条又没有明显事件，自动收敛，防“连续暴跳”
     const last = recentTurns[recentTurns.length - 1];
     if (
       last &&
@@ -710,12 +707,11 @@
     }
 
     return {
-      delta: Math.min(total, 360), // 单条最多6小时
+      delta: Math.min(total, 360),
       reason: reason || "generic_progress"
     };
   }
 
-  // ---------- 日期天气 ----------
   function tryParseDate(text) {
     const m = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]/);
     if (!m) return false;
@@ -747,7 +743,6 @@
     return true;
   }
 
-  // ---------- 消息 ----------
   function extractMessageText(mesEl) {
     const t =
       mesEl.querySelector(".mes_text")?.innerText ||
@@ -757,12 +752,56 @@
     return t.trim();
   }
 
-  function processMesElement(mesEl) {
-    if (!mesEl || processedMes.has(mesEl)) return;
+  function isCharacterMessage(mesEl) {
+    if (!mesEl) return false;
+    if (mesEl.classList.contains("is_user")) return false;
+    if (mesEl.classList.contains("user_mes")) return false;
+    if (mesEl.classList.contains("mes_user")) return false;
+    if (mesEl.classList.contains("user")) return false;
 
-    const text = extractMessageText(mesEl);
+    const isUserAttr = mesEl.getAttribute("is_user");
+    if (isUserAttr === "true" || isUserAttr === "1") return false;
+
+    const dataUser = mesEl.dataset?.isUser;
+    if (dataUser === "true" || dataUser === "1") return false;
+
+    return true;
+  }
+
+  function scheduleCharacterMessageProcessing(mesEl) {
+    if (!mesEl || processedMes.has(mesEl) || !isCharacterMessage(mesEl)) return;
+
+    const currentText = extractMessageText(mesEl);
+    if (!currentText) return;
+
+    const previousTimer = pendingMesTimers.get(mesEl);
+    if (previousTimer) clearTimeout(previousTimer);
+    pendingMesSnapshots.set(mesEl, currentText);
+
+    const timer = setTimeout(() => {
+      const latestText = extractMessageText(mesEl);
+      const snapshot = pendingMesSnapshots.get(mesEl) || "";
+
+      if (!latestText) return;
+      if (latestText !== snapshot) {
+        scheduleCharacterMessageProcessing(mesEl);
+        return;
+      }
+
+      finalizeCharacterMessage(mesEl, latestText);
+    }, MESSAGE_STABLE_DELAY);
+
+    pendingMesTimers.set(mesEl, timer);
+  }
+
+  function finalizeCharacterMessage(mesEl, text) {
+    if (!mesEl || processedMes.has(mesEl)) return;
+    if (!isCharacterMessage(mesEl)) return;
     if (!text) return;
+
     processedMes.add(mesEl);
+    pendingMesTimers.delete(mesEl);
+    pendingMesSnapshots.delete(mesEl);
 
     tryParseWeather(text);
     tryParseDate(text);
@@ -774,10 +813,9 @@
     applyDelta(result.delta, result.reason, text);
   }
 
-  // ---------- 设置 ----------
   function openSettings() {
     const menu = prompt(
-`Story Time v0.28 设置
+`Story Time 设置
 当前：${hhmm(state.minutes)} | ${state.month}月${state.day}日 | ${state.weather}
 自动天气：${state.autoWeather ? "开" : "关"}
 会话Key：${chatKey}
@@ -846,7 +884,6 @@
     }
   }
 
-  // ---------- 观察 ----------
   function bindChatObserver(chat) {
     if (chatObserver) {
       chatObserver.disconnect();
@@ -859,24 +896,41 @@
     chat.querySelectorAll(".mes").forEach((el) => processedMes.add(el));
 
     chatObserver = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        for (const node of m.addedNodes) {
+      for (const mutation of mutations) {
+        let targetMes = null;
+
+        if (mutation.target instanceof HTMLElement) {
+          targetMes = mutation.target.closest(".mes");
+        }
+
+        if (targetMes && isCharacterMessage(targetMes) && !processedMes.has(targetMes)) {
+          scheduleCharacterMessageProcessing(targetMes);
+        }
+
+        for (const node of mutation.addedNodes) {
           if (!(node instanceof HTMLElement)) continue;
 
           if (node.classList?.contains("mes")) {
-            setTimeout(() => processMesElement(node), 350);
-            setTimeout(() => processMesElement(node), 1200);
+            if (isCharacterMessage(node) && !processedMes.has(node)) {
+              scheduleCharacterMessageProcessing(node);
+            }
+            continue;
           }
 
-          node.querySelectorAll?.(".mes").forEach((el) => {
-            setTimeout(() => processMesElement(el), 350);
-            setTimeout(() => processMesElement(el), 1200);
+          node.querySelectorAll?.(".mes").forEach((mesEl) => {
+            if (isCharacterMessage(mesEl) && !processedMes.has(mesEl)) {
+              scheduleCharacterMessageProcessing(mesEl);
+            }
           });
         }
       }
     });
 
-    chatObserver.observe(chat, { childList: true, subtree: true });
+    chatObserver.observe(chat, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
   }
 
   function ensureChatBinding() {
@@ -885,7 +939,6 @@
     ensureBar();
   }
 
-  // ---------- 启动 ----------
   function boot() {
     chatKey = getChatKey();
     loadState();
@@ -905,7 +958,7 @@
       }
     }, 800);
 
-    console.log("[Story Time v0.28] loaded.");
+    console.log("[Story Time v0.29] loaded.");
   }
 
   if (document.readyState === "loading") {
