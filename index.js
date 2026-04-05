@@ -29,6 +29,8 @@
   };
 
   let state = { ...DEFAULT_STATE };
+  let previewState = null;
+  let pendingUserText = "";
   let chatKey = "";
   let barEl = null;
   let currentChatEl = null;
@@ -37,6 +39,10 @@
   const processedMes = new WeakSet();
   const pendingMesTimers = new WeakMap();
   const pendingMesSnapshots = new WeakMap();
+
+  function cloneState(src) {
+    return JSON.parse(JSON.stringify(src));
+  }
 
   function getContextSafe() {
     try {
@@ -74,12 +80,15 @@
     const raw = localStorage.getItem(chatKey);
     if (!raw) {
       state = { ...DEFAULT_STATE };
+      previewState = null;
       return;
     }
     try {
       state = { ...DEFAULT_STATE, ...JSON.parse(raw) };
+      previewState = null;
     } catch (_) {
       state = { ...DEFAULT_STATE };
+      previewState = null;
     }
   }
 
@@ -102,48 +111,52 @@
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
-  function advanceOneDay() {
-    state.day += 1;
-    if (state.day > daysInMonth(state.year, state.month)) {
-      state.day = 1;
-      state.month += 1;
-      if (state.month > 12) {
-        state.month = 1;
-        state.year += 1;
+  function advanceOneDay(targetState) {
+    targetState.day += 1;
+    if (targetState.day > daysInMonth(targetState.year, targetState.month)) {
+      targetState.day = 1;
+      targetState.month += 1;
+      if (targetState.month > 12) {
+        targetState.month = 1;
+        targetState.year += 1;
       }
     }
-    if (state.autoWeather) state.weather = rollWeather(state.month);
+    if (targetState.autoWeather) targetState.weather = rollWeather(targetState.month);
   }
 
-  function backOneDay() {
-    if (state.year === 1 && state.month === 1 && state.day === 1) return;
-    state.day -= 1;
-    if (state.day < 1) {
-      state.month -= 1;
-      if (state.month < 1) {
-        state.month = 12;
-        state.year = Math.max(1, state.year - 1);
+  function backOneDay(targetState) {
+    if (targetState.year === 1 && targetState.month === 1 && targetState.day === 1) return;
+    targetState.day -= 1;
+    if (targetState.day < 1) {
+      targetState.month -= 1;
+      if (targetState.month < 1) {
+        targetState.month = 12;
+        targetState.year = Math.max(1, targetState.year - 1);
       }
-      state.day = daysInMonth(state.year, state.month);
+      targetState.day = daysInMonth(targetState.year, targetState.month);
     }
   }
 
-  function shiftDate(days) {
-    if (days > 0) for (let i = 0; i < days; i++) advanceOneDay();
-    if (days < 0) for (let i = 0; i < Math.abs(days); i++) backOneDay();
+  function shiftDate(targetState, days) {
+    if (days > 0) {
+      for (let i = 0; i < days; i++) advanceOneDay(targetState);
+    }
+    if (days < 0) {
+      for (let i = 0; i < Math.abs(days); i++) backOneDay(targetState);
+    }
   }
 
-  function normalizeTime() {
+  function normalizeTime(targetState) {
     let dayShift = 0;
-    while (state.minutes >= 1440) {
-      state.minutes -= 1440;
+    while (targetState.minutes >= 1440) {
+      targetState.minutes -= 1440;
       dayShift += 1;
     }
-    while (state.minutes < 0) {
-      state.minutes += 1440;
+    while (targetState.minutes < 0) {
+      targetState.minutes += 1440;
       dayShift -= 1;
     }
-    if (dayShift !== 0) shiftDate(dayShift);
+    if (dayShift !== 0) shiftDate(targetState, dayShift);
   }
 
   function hhmm(mins) {
@@ -152,8 +165,8 @@
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   }
 
-  function getFestival() {
-    return FESTIVALS[`${state.month}-${state.day}`] || "";
+  function getFestival(targetState) {
+    return FESTIVALS[`${targetState.month}-${targetState.day}`] || "";
   }
 
   function getPhase(mins) {
@@ -185,8 +198,8 @@
     return `${sign}${m}分钟`;
   }
 
-  function buildTransitionLabel(delta, reason) {
-    const phase = getPhase(state.minutes);
+  function buildTransitionLabel(targetState, delta, reason) {
+    const phase = getPhase(targetState.minutes);
     if (delta >= 300 || reason === "sleep" || reason === "sleep_chain") {
       if (phase === "清晨") return "第二天清晨";
       if (phase === "上午") return "第二天早上";
@@ -206,11 +219,11 @@
     refreshModelState();
   }
 
-  function recordTransition(delta, reason, text) {
-    state.lastDeltaMinutes = delta || 0;
-    state.lastDeltaReason = reason || "";
-    state.lastTriggerText = (text || "").slice(0, 120);
-    state.lastTransitionLabel = buildTransitionLabel(delta || 0, reason || "");
+  function updateTransitionMeta(targetState, delta, reason, text) {
+    targetState.lastDeltaMinutes = delta || 0;
+    targetState.lastDeltaReason = reason || "";
+    targetState.lastTriggerText = (text || "").slice(0, 120);
+    targetState.lastTransitionLabel = buildTransitionLabel(targetState, delta || 0, reason || "");
   }
 
   function pushRecentTurn(text, delta, reason) {
@@ -245,7 +258,7 @@
     const metaEl = barEl.querySelector("#st-story-clock-meta");
     if (timeEl) timeEl.textContent = hhmm(state.minutes);
 
-    const festival = getFestival();
+    const festival = getFestival(state);
     const meta = `${state.month}月${state.day}日 · ${state.weather}${festival ? ` · ${festival}` : ""}`;
     if (metaEl) metaEl.textContent = meta;
   }
@@ -258,8 +271,8 @@
       const btn = e.target.closest(".st-story-clock-btn");
       if (!btn) return;
       const act = btn.dataset.act;
-      if (act === "+10") applyDelta(10, "manual", "手动调整+10m");
-      if (act === "-10") applyDelta(-10, "manual", "手动调整-10m");
+      if (act === "+10") applyCommittedDelta(10, "manual", "手动调整+10m");
+      if (act === "-10") applyCommittedDelta(-10, "manual", "手动调整-10m");
       if (act === "settings") openSettings();
     });
   }
@@ -338,16 +351,22 @@
   }
 
   function buildPrompt() {
-    const festival = getFestival();
-    const recentJump = state.lastDeltaMinutes >= 30;
-    const weatherImportant = /小雨|中雨|雷阵雨|雪|雾/.test(state.weather);
+    const activeState = previewState || state;
+    const festival = getFestival(activeState);
+    const recentJump = activeState.lastDeltaMinutes >= 30;
+    const weatherImportant = /小雨|中雨|雷阵雨|雪|雾/.test(activeState.weather);
+    const usingPreview = Boolean(previewState);
 
     const dynamicRules = [];
+    if (usingPreview) {
+      dynamicRules.push("本轮用户输入已带来明确的剧情状态变化，请以当前状态为准进行描写。");
+    }
+
     if (recentJump) dynamicRules.push("最近发生了明显时间推进，请在合适位置自然体现时段变化。");
     else dynamicRules.push("最近没有明显时间跳跃，不要刻意重复时段词。");
 
-    if (state.lastDeltaMinutes >= 120 || state.lastDeltaReason === "sleep" || state.lastDeltaReason === "sleep_chain") {
-      dynamicRules.push("若刚经历睡眠/数小时跳时，可自然使用“第二天清晨”“数小时后”等表达。");
+    if (activeState.lastDeltaMinutes >= 120 || activeState.lastDeltaReason === "sleep" || activeState.lastDeltaReason === "sleep_chain") {
+      dynamicRules.push("若刚经历睡眠或数小时跳时，可自然使用“第二天清晨”“数小时后”等表达。");
     }
 
     if (weatherImportant) dynamicRules.push("当前天气会影响体感和行动，可在需要时体现。");
@@ -356,20 +375,21 @@
     if (festival) dynamicRules.push("节日仅在互动确实相关时再体现，不要每轮复读。");
 
     return `[剧情状态]
-- 当前时间: ${hhmm(state.minutes)}（${getPhase(state.minutes)}）
-- 当前日期: ${state.month}月${state.day}日
-- 当前天气: ${state.weather}
+- 当前时间: ${hhmm(activeState.minutes)}（${getPhase(activeState.minutes)}）
+- 当前日期: ${activeState.month}月${activeState.day}日
+- 当前天气: ${activeState.weather}
 - 当前节日: ${festival || "无"}
-- 时段倾向: ${getMealHint(state.minutes)}
-- 最近时间变化: ${formatDelta(state.lastDeltaMinutes)}
-- 最近变化原因: ${state.lastDeltaReason || "无"}
-- 建议表现: ${state.lastTransitionLabel || "无需特别强调"}
+- 时段倾向: ${getMealHint(activeState.minutes)}
+- 最近时间变化: ${formatDelta(activeState.lastDeltaMinutes)}
+- 最近变化原因: ${activeState.lastDeltaReason || "无"}
+- 建议表现: ${activeState.lastTransitionLabel || "无需特别强调"}
 
 [写作原则]
 1. 始终遵守剧情状态，让行为、作息、环境与时间天气一致。
-2. 不要每条都重复“早晨/下雨/节日”；只在它们影响当前场景与行为时自然体现。
-3. 若上一条已表现过时段或天气，本条应收敛，除非剧情有新变化。
-4. 除非剧情明确再次跳时，否则不要擅自大幅改动时间。
+2. 若用户本轮已明确给出“天黑了/下雨了/第二天/现在几点”等事实，请直接按该事实写，不要否定、误解或当成幻觉。
+3. 不要每条都重复“早晨/下雨/节日”；只在它们影响当前场景与行为时自然体现。
+4. 若上一条已表现过时段或天气，本条应收敛，除非剧情有新变化。
+5. 除非剧情明确再次跳时，否则不要擅自大幅改动时间。
 
 [本轮额外提醒]
 - ${dynamicRules.join("\n- ")}`;
@@ -383,6 +403,8 @@
     window.storyTimeDebug = {
       chatKey,
       state: { ...state },
+      previewState: previewState ? { ...previewState } : null,
+      pendingUserText,
       prompt,
       injected: ok,
       extensionPromptEntry: ctx?.extensionPrompts?.[EXT_ID] || null,
@@ -390,23 +412,23 @@
     };
   }
 
-  function applyDelta(delta, reason = "generic_progress", triggerText = "") {
+  function applyCommittedDelta(delta, reason = "generic_progress", triggerText = "") {
     if (!delta || Number.isNaN(delta)) return;
-    recordTransition(delta, reason, triggerText);
     state.minutes += delta;
-    normalizeTime();
+    normalizeTime(state);
+    updateTransitionMeta(state, delta, reason, triggerText);
     pushRecentTurn(triggerText || reason, delta, reason);
+    previewState = null;
+    pendingUserText = "";
     commitState();
   }
 
-  function setAbsoluteTime(h, m, reason = "absolute_time", text = "") {
-    const oldMinutes = state.minutes;
-    state.minutes = h * 60 + m;
-    normalizeTime();
-    const delta = state.minutes - oldMinutes;
-    recordTransition(delta, reason, text);
-    pushRecentTurn(text || `绝对时间设定 ${hhmm(state.minutes)}`, delta, reason);
-    commitState();
+  function setAbsoluteTimeOnState(targetState, h, m, reason = "absolute_time", text = "") {
+    const oldMinutes = targetState.minutes;
+    targetState.minutes = h * 60 + m;
+    normalizeTime(targetState);
+    const delta = targetState.minutes - oldMinutes;
+    updateTransitionMeta(targetState, delta, reason, text);
   }
 
   function hashText(text) {
@@ -438,34 +460,38 @@
     return NaN;
   }
 
-  function tryParseAbsoluteTime(text) {
+  function parseAbsoluteTimeIntoState(targetState, text, previewMode = false) {
     let m = text.match(/([01]?\d|2[0-3])[:：]([0-5]\d)/);
     if (m) {
-      setAbsoluteTime(parseInt(m[1], 10), parseInt(m[2], 10), "absolute_time", text);
+      setAbsoluteTimeOnState(targetState, parseInt(m[1], 10), parseInt(m[2], 10), previewMode ? "preview_anchor" : "absolute_time", text);
       return true;
     }
 
     m = text.match(/([01]?\d|2[0-3])\s*点\s*([0-5]?\d)?\s*分?/);
     if (m) {
-      setAbsoluteTime(parseInt(m[1], 10), m[2] ? parseInt(m[2], 10) : 0, "absolute_time", text);
+      setAbsoluteTimeOnState(targetState, parseInt(m[1], 10), m[2] ? parseInt(m[2], 10) : 0, previewMode ? "preview_anchor" : "absolute_time", text);
       return true;
     }
     return false;
   }
 
-  function tryParsePeriodAnchor(text) {
+  function parsePeriodAnchorIntoState(targetState, text, previewMode = false) {
     let touched = false;
     let deltaGuess = 0;
 
     if (/(第二天|次日|翌日|隔天)/.test(text)) {
-      shiftDate(1);
+      shiftDate(targetState, 1);
       touched = true;
       deltaGuess += 1440;
     }
 
-    const m = text.match(/(到了|已是|现在是|此时|时间来到).{0,4}(清晨|早上|上午|中午|下午|傍晚|晚上|深夜|凌晨)/);
+    const m = text.match(/(到了|已是|现在是|此时|时间来到).{0,4}(清晨|早上|上午|中午|下午|傍晚|晚上|深夜|凌晨)|天黑了|夜深了|天亮了/);
     if (m) {
-      const period = m[2];
+      let period = "";
+      if (m[2]) period = m[2];
+      else if (/天黑了|夜深了/.test(m[0])) period = "夜晚";
+      else if (/天亮了/.test(m[0])) period = "清晨";
+
       const map = {
         "凌晨": 2 * 60,
         "深夜": 1 * 60,
@@ -475,20 +501,68 @@
         "中午": 12 * 60,
         "下午": 15 * 60,
         "傍晚": 18 * 60,
-        "晚上": 20 * 60
+        "晚上": 20 * 60,
+        "夜晚": 20 * 60
       };
-      state.minutes = map[period] ?? state.minutes;
-      touched = true;
-      if (deltaGuess === 0) deltaGuess = 60;
+
+      if (period && map[period] != null) {
+        targetState.minutes = map[period];
+        touched = true;
+        if (deltaGuess === 0) deltaGuess = 60;
+      }
     }
 
     if (!touched) return false;
 
-    normalizeTime();
-    recordTransition(deltaGuess, "period_anchor", text);
-    pushRecentTurn(text, deltaGuess, "period_anchor");
-    commitState();
+    normalizeTime(targetState);
+    updateTransitionMeta(targetState, deltaGuess, previewMode ? "preview_anchor" : "period_anchor", text);
     return true;
+  }
+
+  function parseDateIntoState(targetState, text, previewMode = false) {
+    const m = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]/);
+    if (!m) return false;
+    const mm = parseInt(m[1], 10);
+    const dd = parseInt(m[2], 10);
+    if (mm < 1 || mm > 12) return false;
+    if (dd < 1 || dd > daysInMonth(targetState.year, mm)) return false;
+
+    targetState.month = mm;
+    targetState.day = dd;
+    updateTransitionMeta(targetState, 0, previewMode ? "preview_date" : "date_anchor", text);
+    return true;
+  }
+
+  function parseWeatherIntoState(targetState, text, previewMode = false) {
+    let next = "";
+    if (/雷阵雨|打雷/.test(text)) next = "雷阵雨";
+    else if (/暴雨|大雨/.test(text)) next = "中雨";
+    else if (/小雨|下雨|雨天|下起了小雨|外面下起了雨/.test(text)) next = "小雨";
+    else if (/下雪|雪天/.test(text)) next = "雪";
+    else if (/多云/.test(text)) next = "多云";
+    else if (/阴天|天阴/.test(text)) next = "阴";
+    else if (/大雾|起雾|雾天/.test(text)) next = "雾";
+    else if (/晴天|天晴|阳光明媚/.test(text)) next = "晴";
+
+    if (!next || next === targetState.weather) return false;
+    targetState.weather = next;
+    updateTransitionMeta(targetState, 0, previewMode ? "preview_weather" : "weather_anchor", text);
+    return true;
+  }
+
+  function buildPreviewStateFromUser(text) {
+    if (!text) return null;
+
+    const nextState = cloneState(state);
+    let changed = false;
+
+    changed = parseWeatherIntoState(nextState, text, true) || changed;
+    changed = parseDateIntoState(nextState, text, true) || changed;
+    changed = parseAbsoluteTimeIntoState(nextState, text, true) || changed;
+    changed = parsePeriodAnchorIntoState(nextState, text, true) || changed;
+
+    if (!changed) return null;
+    return nextState;
   }
 
   function parseExplicitDuration(text) {
@@ -542,7 +616,7 @@
     { name: "medical", reg: /(包扎|治疗|看医生|就诊|输液|护理)/, range: [20, 90], reason: "medical" }
   ];
 
-  function estimateCategoryMinutes(text) {
+  function estimateCategoryMinutes(text, baseState) {
     let minutes = 0;
     let count = 0;
     let mainReason = "";
@@ -555,7 +629,7 @@
       let max = rule.range[1];
 
       if (rule.name === "meal") {
-        const current = state.minutes;
+        const current = baseState.minutes;
         if (current >= 330 && current <= 570) {
           min = 15;
           max = 30;
@@ -568,7 +642,7 @@
         }
       }
 
-      minutes += pickRange(min, max, `${text}|${rule.name}|${state.minutes}`);
+      minutes += pickRange(min, max, `${text}|${rule.name}|${baseState.minutes}`);
       if (!mainReason) mainReason = rule.reason;
     }
 
@@ -587,7 +661,7 @@
       n += pickRange(3, 12, text + "|flow_mid");
       reason = reason || "narrative_flow";
     }
-    if (/(天色渐暗|夜幕降临|天亮了|日出|日落|黄昏|傍晚时分)/.test(text)) {
+    if (/(天色渐暗|夜幕降临|天亮了|日出|日落|黄昏|傍晚时分|天黑了)/.test(text)) {
       n += pickRange(20, 70, text + "|scene_daylight");
       reason = reason || "scene_shift";
     }
@@ -657,11 +731,11 @@
     return base + (hashText(clean) % 2);
   }
 
-  function estimateMinutesByText(text) {
+  function estimateMinutesByText(text, baseState) {
     if (!text) return { delta: 0, reason: "none" };
 
     const explicit = parseExplicitDuration(text);
-    const category = estimateCategoryMinutes(text);
+    const category = estimateCategoryMinutes(text, baseState);
     const narrative = estimateNarrativeMinutes(text);
     const contextBonus = estimateContextBonus(text);
 
@@ -712,37 +786,6 @@
     };
   }
 
-  function tryParseDate(text) {
-    const m = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]/);
-    if (!m) return false;
-    const mm = parseInt(m[1], 10);
-    const dd = parseInt(m[2], 10);
-    if (mm < 1 || mm > 12) return false;
-    if (dd < 1 || dd > daysInMonth(state.year, mm)) return false;
-
-    state.month = mm;
-    state.day = dd;
-    commitState();
-    return true;
-  }
-
-  function tryParseWeather(text) {
-    let next = "";
-    if (/雷阵雨|打雷/.test(text)) next = "雷阵雨";
-    else if (/暴雨|大雨/.test(text)) next = "中雨";
-    else if (/小雨|下雨|雨天/.test(text)) next = "小雨";
-    else if (/下雪|雪天/.test(text)) next = "雪";
-    else if (/多云/.test(text)) next = "多云";
-    else if (/阴天|天阴/.test(text)) next = "阴";
-    else if (/大雾|起雾|雾天/.test(text)) next = "雾";
-    else if (/晴天|天晴|阳光明媚/.test(text)) next = "晴";
-
-    if (!next || next === state.weather) return false;
-    state.weather = next;
-    commitState();
-    return true;
-  }
-
   function extractMessageText(mesEl) {
     const t =
       mesEl.querySelector(".mes_text")?.innerText ||
@@ -766,6 +809,52 @@
     if (dataUser === "true" || dataUser === "1") return false;
 
     return true;
+  }
+
+  function isUserMessage(mesEl) {
+    return !isCharacterMessage(mesEl);
+  }
+
+  function primeHistory(chat) {
+    const allMes = chat.querySelectorAll(".mes");
+    allMes.forEach((el) => processedMes.add(el));
+  }
+
+  function handleUserMessagePreview(text) {
+    pendingUserText = text || "";
+    previewState = buildPreviewStateFromUser(pendingUserText);
+    refreshModelState();
+  }
+
+  function settleTurnWithCharacterReply(charText) {
+    const baseState = previewState ? cloneState(previewState) : cloneState(state);
+    const combinedUserAndChar = [pendingUserText, charText].filter(Boolean).join("\n");
+
+    parseWeatherIntoState(baseState, combinedUserAndChar, false);
+    parseDateIntoState(baseState, combinedUserAndChar, false);
+
+    let anchorApplied = false;
+    if (parseAbsoluteTimeIntoState(baseState, combinedUserAndChar, false)) {
+      anchorApplied = true;
+    } else if (parsePeriodAnchorIntoState(baseState, combinedUserAndChar, false)) {
+      anchorApplied = true;
+    }
+
+    const result = estimateMinutesByText(charText, baseState);
+
+    if (anchorApplied) {
+      updateTransitionMeta(baseState, result.delta, result.reason, charText);
+    } else {
+      baseState.minutes += result.delta;
+      normalizeTime(baseState);
+      updateTransitionMeta(baseState, result.delta, result.reason, charText);
+    }
+
+    state = baseState;
+    pushRecentTurn(charText, result.delta, result.reason);
+    previewState = null;
+    pendingUserText = "";
+    commitState();
   }
 
   function scheduleCharacterMessageProcessing(mesEl) {
@@ -803,19 +892,12 @@
     pendingMesTimers.delete(mesEl);
     pendingMesSnapshots.delete(mesEl);
 
-    tryParseWeather(text);
-    tryParseDate(text);
-
-    if (tryParseAbsoluteTime(text)) return;
-    if (tryParsePeriodAnchor(text)) return;
-
-    const result = estimateMinutesByText(text);
-    applyDelta(result.delta, result.reason, text);
+    settleTurnWithCharacterReply(text);
   }
 
   function openSettings() {
     const menu = prompt(
-`Story Time 设置
+`Story Time v0.31 设置
 当前：${hhmm(state.minutes)} | ${state.month}月${state.day}日 | ${state.weather}
 自动天气：${state.autoWeather ? "开" : "关"}
 会话Key：${chatKey}
@@ -837,7 +919,10 @@
       if (!t) return;
       const m = t.match(/^([01]?\d|2[0-3])[:：]([0-5]\d)$/);
       if (!m) return alert("时间格式错误");
-      setAbsoluteTime(parseInt(m[1], 10), parseInt(m[2], 10), "manual", "手动设置时间");
+      setAbsoluteTimeOnState(state, parseInt(m[1], 10), parseInt(m[2], 10), "manual", "手动设置时间");
+      previewState = null;
+      pendingUserText = "";
+      commitState();
       return;
     }
 
@@ -851,6 +936,8 @@
       if (mm < 1 || mm > 12 || dd < 1 || dd > daysInMonth(state.year, mm)) return alert("日期不合法");
       state.month = mm;
       state.day = dd;
+      previewState = null;
+      pendingUserText = "";
       commitState();
       return;
     }
@@ -859,12 +946,16 @@
       const w = prompt("输入天气：晴 / 多云 / 阴 / 小雨 / 中雨 / 雷阵雨 / 雪 / 雾", state.weather);
       if (!w) return;
       state.weather = w.trim();
+      previewState = null;
+      pendingUserText = "";
       commitState();
       return;
     }
 
     if (c === "4") {
       state.autoWeather = !state.autoWeather;
+      previewState = null;
+      pendingUserText = "";
       commitState();
       alert(`自动天气已${state.autoWeather ? "开启" : "关闭"}`);
       return;
@@ -873,6 +964,8 @@
     if (c === "5") {
       if (!confirm("确定重置当前会话状态吗？")) return;
       state = { ...DEFAULT_STATE };
+      previewState = null;
+      pendingUserText = "";
       recentTurns = [];
       commitState();
       return;
@@ -893,7 +986,7 @@
     currentChatEl = chat;
     if (!chat) return;
 
-    chat.querySelectorAll(".mes").forEach((el) => processedMes.add(el));
+    primeHistory(chat);
 
     chatObserver = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
@@ -911,14 +1004,20 @@
           if (!(node instanceof HTMLElement)) continue;
 
           if (node.classList?.contains("mes")) {
-            if (isCharacterMessage(node) && !processedMes.has(node)) {
+            if (isUserMessage(node) && !processedMes.has(node)) {
+              processedMes.add(node);
+              handleUserMessagePreview(extractMessageText(node));
+            } else if (isCharacterMessage(node) && !processedMes.has(node)) {
               scheduleCharacterMessageProcessing(node);
             }
             continue;
           }
 
           node.querySelectorAll?.(".mes").forEach((mesEl) => {
-            if (isCharacterMessage(mesEl) && !processedMes.has(mesEl)) {
+            if (isUserMessage(mesEl) && !processedMes.has(mesEl)) {
+              processedMes.add(mesEl);
+              handleUserMessagePreview(extractMessageText(mesEl));
+            } else if (isCharacterMessage(mesEl) && !processedMes.has(mesEl)) {
               scheduleCharacterMessageProcessing(mesEl);
             }
           });
@@ -943,6 +1042,8 @@
     chatKey = getChatKey();
     loadState();
     recentTurns = [];
+    previewState = null;
+    pendingUserText = "";
     ensureChatBinding();
     commitState();
 
@@ -954,11 +1055,13 @@
         chatKey = k;
         loadState();
         recentTurns = [];
+        previewState = null;
+        pendingUserText = "";
         commitState();
       }
     }, 800);
 
-    console.log("[Story Time v0.29] loaded.");
+    console.log("[Story Time v0.31] loaded.");
   }
 
   if (document.readyState === "loading") {
