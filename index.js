@@ -827,6 +827,7 @@
   }
 
   function settleTurnWithCharacterReply(charText) {
+    console.log("[Story Time] settling with char text:", charText);
     const baseState = previewState ? cloneState(previewState) : cloneState(state);
     const combinedUserAndChar = [pendingUserText, charText].filter(Boolean).join("\n");
 
@@ -884,16 +885,18 @@
   }
 
   function finalizeCharacterMessage(mesEl, text) {
-    if (!mesEl || processedMes.has(mesEl)) return;
-    if (!isCharacterMessage(mesEl)) return;
-    if (!text) return;
+  if (!mesEl || processedMes.has(mesEl)) return;
+  if (!isCharacterMessage(mesEl)) return;
 
-    processedMes.add(mesEl);
-    pendingMesTimers.delete(mesEl);
-    pendingMesSnapshots.delete(mesEl);
+  const finalText = extractMessageText(mesEl) || text || "";
+  if (!finalText) return;
 
-    settleTurnWithCharacterReply(text);
-  }
+  processedMes.add(mesEl);
+  pendingMesTimers.delete(mesEl);
+  pendingMesSnapshots.delete(mesEl);
+
+  settleTurnWithCharacterReply(finalText);
+}
 
   function openSettings() {
     const menu = prompt(
